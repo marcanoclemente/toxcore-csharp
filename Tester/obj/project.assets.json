@@ -1,0 +1,241 @@
+{
+  "version": 3,
+  "targets": {
+    "net8.0": {
+      "libsodium/1.0.20.1": {
+        "type": "package",
+        "runtimeTargets": {
+          "runtimes/ios-arm64/native/libsodium.a": {
+            "assetType": "native",
+            "rid": "ios-arm64"
+          },
+          "runtimes/linux-arm/native/libsodium.so": {
+            "assetType": "native",
+            "rid": "linux-arm"
+          },
+          "runtimes/linux-arm64/native/libsodium.so": {
+            "assetType": "native",
+            "rid": "linux-arm64"
+          },
+          "runtimes/linux-musl-arm/native/libsodium.so": {
+            "assetType": "native",
+            "rid": "linux-musl-arm"
+          },
+          "runtimes/linux-musl-arm64/native/libsodium.so": {
+            "assetType": "native",
+            "rid": "linux-musl-arm64"
+          },
+          "runtimes/linux-musl-x64/native/libsodium.so": {
+            "assetType": "native",
+            "rid": "linux-musl-x64"
+          },
+          "runtimes/linux-x64/native/libsodium.so": {
+            "assetType": "native",
+            "rid": "linux-x64"
+          },
+          "runtimes/maccatalyst-arm64/native/libsodium.a": {
+            "assetType": "native",
+            "rid": "maccatalyst-arm64"
+          },
+          "runtimes/maccatalyst-x64/native/libsodium.a": {
+            "assetType": "native",
+            "rid": "maccatalyst-x64"
+          },
+          "runtimes/osx-arm64/native/libsodium.dylib": {
+            "assetType": "native",
+            "rid": "osx-arm64"
+          },
+          "runtimes/osx-x64/native/libsodium.dylib": {
+            "assetType": "native",
+            "rid": "osx-x64"
+          },
+          "runtimes/tvos-arm64/native/libsodium.a": {
+            "assetType": "native",
+            "rid": "tvos-arm64"
+          },
+          "runtimes/win-arm64/native/libsodium.dll": {
+            "assetType": "native",
+            "rid": "win-arm64"
+          },
+          "runtimes/win-x64/native/libsodium.dll": {
+            "assetType": "native",
+            "rid": "win-x64"
+          },
+          "runtimes/win-x86/native/libsodium.dll": {
+            "assetType": "native",
+            "rid": "win-x86"
+          }
+        }
+      },
+      "Sodium.Core/1.4.0": {
+        "type": "package",
+        "dependencies": {
+          "libsodium": "[1.0.20.1, 1.0.21)"
+        },
+        "compile": {
+          "lib/net8.0/Sodium.Core.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/net8.0/Sodium.Core.dll": {
+            "related": ".xml"
+          }
+        }
+      },
+      "Toxcore/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v8.0",
+        "dependencies": {
+          "Sodium.Core": "1.4.0"
+        },
+        "compile": {
+          "bin/placeholder/Toxcore.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/Toxcore.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "libsodium/1.0.20.1": {
+      "sha512": "pkiceEqJDQFHjbga3k/oPfTVX9g+GKJZ1VrkuiLhaymt9YNw1Dr7cX9hNuZuNaWcr9WD0moW55k4pMwzQ7JaZQ==",
+      "type": "package",
+      "path": "libsodium/1.0.20.1",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "AUTHORS",
+        "ChangeLog",
+        "LICENSE",
+        "libsodium.1.0.20.1.nupkg.sha512",
+        "libsodium.nuspec",
+        "runtimes/ios-arm64/native/libsodium.a",
+        "runtimes/linux-arm/native/libsodium.so",
+        "runtimes/linux-arm64/native/libsodium.so",
+        "runtimes/linux-musl-arm/native/libsodium.so",
+        "runtimes/linux-musl-arm64/native/libsodium.so",
+        "runtimes/linux-musl-x64/native/libsodium.so",
+        "runtimes/linux-x64/native/libsodium.so",
+        "runtimes/maccatalyst-arm64/native/libsodium.a",
+        "runtimes/maccatalyst-x64/native/libsodium.a",
+        "runtimes/osx-arm64/native/libsodium.dylib",
+        "runtimes/osx-x64/native/libsodium.dylib",
+        "runtimes/tvos-arm64/native/libsodium.a",
+        "runtimes/win-arm64/native/libsodium.dll",
+        "runtimes/win-x64/native/libsodium.dll",
+        "runtimes/win-x86/native/libsodium.dll"
+      ]
+    },
+    "Sodium.Core/1.4.0": {
+      "sha512": "kHrsyfrcCEbqHIsI2QZ3oe5P5TzotDi9kFBLD44Zh6C8Q3OBoNjSvnSKKaNjL9xZcxS6nZOWb9aZjF8qsjG0yA==",
+      "type": "package",
+      "path": "sodium.core/1.4.0",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "LICENSE",
+        "icon.png",
+        "lib/net8.0-ios18.0/Sodium.Core.dll",
+        "lib/net8.0-ios18.0/Sodium.Core.xml",
+        "lib/net8.0-maccatalyst18.0/Sodium.Core.dll",
+        "lib/net8.0-maccatalyst18.0/Sodium.Core.xml",
+        "lib/net8.0-tvos18.0/Sodium.Core.dll",
+        "lib/net8.0-tvos18.0/Sodium.Core.xml",
+        "lib/net8.0/Sodium.Core.dll",
+        "lib/net8.0/Sodium.Core.xml",
+        "lib/netstandard2.0/Sodium.Core.dll",
+        "lib/netstandard2.0/Sodium.Core.xml",
+        "lib/netstandard2.1/Sodium.Core.dll",
+        "lib/netstandard2.1/Sodium.Core.xml",
+        "sodium.core.1.4.0.nupkg.sha512",
+        "sodium.core.nuspec"
+      ]
+    },
+    "Toxcore/1.0.0": {
+      "type": "project",
+      "path": "../Toxcore/Toxcore.csproj",
+      "msbuildProject": "../Toxcore/Toxcore.csproj"
+    }
+  },
+  "projectFileDependencyGroups": {
+    "net8.0": [
+      "Toxcore >= 1.0.0"
+    ]
+  },
+  "packageFolders": {
+    "C:\\Users\\cleme\\.nuget\\packages\\": {},
+    "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "C:\\Users\\cleme\\Documents\\Tester\\Tester.csproj",
+      "projectName": "Tester",
+      "projectPath": "C:\\Users\\cleme\\Documents\\Tester\\Tester.csproj",
+      "packagesPath": "C:\\Users\\cleme\\.nuget\\packages\\",
+      "outputPath": "C:\\Users\\cleme\\Documents\\Tester\\obj\\",
+      "projectStyle": "PackageReference",
+      "fallbackFolders": [
+        "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+      ],
+      "configFilePaths": [
+        "C:\\Users\\cleme\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+      ],
+      "originalTargetFrameworks": [
+        "net8.0"
+      ],
+      "sources": {
+        "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+        "C:\\Program Files\\dotnet\\library-packs": {},
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "projectReferences": {
+            "C:\\Users\\cleme\\Documents\\Toxcore\\Toxcore.csproj": {
+              "projectPath": "C:\\Users\\cleme\\Documents\\Toxcore\\Toxcore.csproj"
+            }
+          }
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      },
+      "SdkAnalysisLevel": "9.0.300"
+    },
+    "frameworks": {
+      "net8.0": {
+        "targetAlias": "net8.0",
+        "imports": [
+          "net461",
+          "net462",
+          "net47",
+          "net471",
+          "net472",
+          "net48",
+          "net481"
+        ],
+        "assetTargetFallback": true,
+        "warn": true,
+        "frameworkReferences": {
+          "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          }
+        },
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.304/PortableRuntimeIdentifierGraph.json"
+      }
+    }
+  }
+}

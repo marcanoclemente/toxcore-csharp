@@ -1,0 +1,12 @@
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\Toxcore.csproj.AssemblyReference.cache
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\Toxcore.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\Toxcore.AssemblyInfoInputs.cache
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\Toxcore.AssemblyInfo.cs
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\Toxcore.csproj.CoreCompileInputs.cache
+C:\Users\cleme\Documents\Toxcore\bin\Debug\net8.0\Toxcore.deps.json
+C:\Users\cleme\Documents\Toxcore\bin\Debug\net8.0\Toxcore.dll
+C:\Users\cleme\Documents\Toxcore\bin\Debug\net8.0\Toxcore.pdb
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\Toxcore.dll
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\refint\Toxcore.dll
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\Toxcore.pdb
+C:\Users\cleme\Documents\Toxcore\obj\Debug\net8.0\ref\Toxcore.dll

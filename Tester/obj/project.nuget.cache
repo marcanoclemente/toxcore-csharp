@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "chGWTxaQPO0=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\cleme\\Documents\\Tester\\Tester.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\cleme\\.nuget\\packages\\libsodium\\1.0.20.1\\libsodium.1.0.20.1.nupkg.sha512",
+    "C:\\Users\\cleme\\.nuget\\packages\\sodium.core\\1.4.0\\sodium.core.1.4.0.nupkg.sha512"
+  ],
+  "logs": []
+}
