@@ -57,6 +57,9 @@ namespace ToxCore.Core
     /// </summary>
     public class Onion
     {
+        private const string LOG_TAG = "ONION";
+        private long _lastLogTime = 0;
+
         public const int ONION_MAX_PACKET_SIZE = 1400;
         public const int ONION_RETURN_SIZE = 128;
         public const int ONION_PATH_LENGTH = 3;
@@ -112,6 +115,7 @@ namespace ToxCore.Core
             IsRunning = false;
 
             Socket = Network.new_socket(2, 2, 17);
+            Logger.Log.InfoF($"[{LOG_TAG}] Onion inicializado - Socket: {Socket}");
         }
 
         // ==================== FUNCIONES COMPATIBLES CON C ORIGINAL ====================
@@ -121,6 +125,8 @@ namespace ToxCore.Core
         /// </summary>
         public int onion_send_1(byte[] plain, int length, byte[] public_key)
         {
+            Logger.Log.DebugF($"[{LOG_TAG}] Enviando paquete onion_send_1 - Tamaño: {length} bytes");
+
             if (!IsRunning || Socket == -1) return -1;
             if (plain == null || length > ONION_MAX_PACKET_SIZE) return -1;
 
@@ -141,14 +147,17 @@ namespace ToxCore.Core
                     if (sent > 0)
                     {
                         path.LastUsed = DateTime.UtcNow.Ticks;
+                        Logger.Log.TraceF($"[{LOG_TAG}] Paquete onion_send_1 enviado: {sent} bytes");
                         return sent;
                     }
-
+                    
+                    Logger.Log.WarningF($"[{LOG_TAG}] Falló envío onion_send_1");
                     return -1;
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en onion_send_1: {ex.Message}");
                 return -1;
             }
         }
@@ -346,6 +355,8 @@ namespace ToxCore.Core
 
         public int create_onion_path(DHT dht)
         {
+            Logger.Log.DebugF($"[{LOG_TAG}] Creando nuevo path Onion");
+
             if (dht == null) return -1;
 
             try
@@ -355,7 +366,11 @@ namespace ToxCore.Core
                     if (_onionPaths.Count >= MAX_ONION_PATHS) return -1;
 
                     var closestNodes = dht.GetClosestNodes(SelfPublicKey, ONION_PATH_LENGTH);
-                    if (closestNodes.Count < ONION_PATH_LENGTH) return -1;
+                    if (closestNodes.Count < ONION_PATH_LENGTH)
+                    {
+                        Logger.Log.WarningF($"[{LOG_TAG}] No hay suficientes nodos para crear path (necesarios: {ONION_PATH_LENGTH}, disponibles: {closestNodes.Count})");
+                        return -1;
+                    }
 
                     var newPath = new OnionPath(_lastPathNumber++);
 
@@ -365,11 +380,13 @@ namespace ToxCore.Core
                     }
 
                     _onionPaths.Add(newPath);
+                    Logger.Log.InfoF($"[{LOG_TAG}] Nuevo path creado: {newPath.PathNumber} [Total: {_onionPaths.Count}]");
                     return newPath.PathNumber;
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando path: {ex.Message}");
                 return -1;
             }
         }
@@ -398,8 +415,14 @@ namespace ToxCore.Core
 
         public int Start()
         {
-            if (Socket == -1) return -1;
+            if (Socket == -1)
+            {
+                Logger.Log.Error($"[{LOG_TAG}] No se puede iniciar - Socket inválido");
+                return -1;
+            }
+
             IsRunning = true;
+            Logger.Log.Info($"[{LOG_TAG}] Servicio Onion iniciado");
             return 0;
         }
 
@@ -442,10 +465,17 @@ namespace ToxCore.Core
                     // En una implementación real, usaríamos DHT aquí para crear nuevos paths
                     _lastMaintenanceTime = currentTime;
                 }
+
+                if ((currentTime - _lastLogTime) > TimeSpan.TicksPerSecond * 60)
+                {
+                    Logger.Log.DebugF($"[{LOG_TAG}] Estadísticas - Nodos: {TotalOnionNodes}, Paths: {TotalPaths}, Activos: {ActivePaths}");
+                    _lastLogTime = currentTime;
+                }
+
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // Silenciar errores en mantenimiento
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en trabajo periódico: {ex.Message}");
             }
         }
 

@@ -85,6 +85,8 @@ namespace ToxCore.Core
     /// </summary>
     public class DHT
     {
+        private const string LOG_TAG = "DHT";
+
         public const int MAX_FRIEND_CLOSE = 8;
         public const int MAX_CLOSE_TO_BOOTSTRAP_NODES = 16;
         public const int DHT_PING_INTERVAL = 30000; // 30 segundos
@@ -99,6 +101,8 @@ namespace ToxCore.Core
         private readonly object _nodesLock = new object();
         private int _lastPingID;
         private long _lastBootstrapTime;
+
+        private long _lastLogTime = 0;
 
         // Estadísticas
         public int TotalNodes => _nodes.Count;
@@ -127,6 +131,7 @@ namespace ToxCore.Core
 
             // Crear socket para DHT
             Socket = Network.new_socket(2, 2, 17); // IPv4 UDP
+            Logger.Log.Info($"[{LOG_TAG}] DHT inicializado - Socket: {Socket}");
         }
 
         // ==================== FUNCIONES COMPATIBLES CON C ORIGINAL ====================
@@ -136,6 +141,8 @@ namespace ToxCore.Core
         /// </summary>
         public int DHT_bootstrap(IPPort ipp, byte[] public_key)
         {
+            Logger.Log.InfoF($"[{LOG_TAG}] Bootstrap a {ipp} [PK: {BitConverter.ToString(public_key, 0, 8).Replace("-", "")}...]");
+
             if (Socket == -1) return -1;
 
             try
@@ -150,15 +157,18 @@ namespace ToxCore.Core
 
                 if (sent > 0)
                 {
-                    Console.WriteLine($"[DHT] Bootstrap sent to {ipp}");
+                    Logger.Log.DebugF($"[{LOG_TAG}] Bootstrap enviado a {ipp}");
                     return 0;
                 }
-
-                return -1;
+                else
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Falló envío de bootstrap a {ipp}");
+                    return -1;
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[DHT] Bootstrap error: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en bootstrap: {ex.Message}");
                 return -1;
             }
         }
@@ -270,12 +280,14 @@ namespace ToxCore.Core
                     {
                         existingNode.LastSeen = DateTime.UtcNow.Ticks;
                         existingNode.IsActive = true;
+                        Logger.Log.DebugF($"[{LOG_TAG}] Nodo actualizado: {endPoint}");
                         return 1;
                     }
 
                     // Crear nuevo nodo - IMPLEMENTACIÓN REAL
                     var newNode = new DHTNode(publicKey, endPoint);
                     _nodes.Add(newNode);
+                    Logger.Log.InfoF($"[{LOG_TAG}] Nuevo nodo agregado: {endPoint} [Total: {_nodes.Count}]");
 
                     // Limpieza de nodos antiguos - IMPLEMENTACIÓN REAL
                     if (_nodes.Count > 1000)
@@ -289,7 +301,7 @@ namespace ToxCore.Core
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[DHT] AddNode error: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error agregando nodo: {ex.Message}");
                 return -1;
             }
         }
@@ -730,12 +742,21 @@ namespace ToxCore.Core
                     }
                     _lastBootstrapTime = currentTime;
                 }
+
+                if ((currentTime - _lastLogTime) > TimeSpan.TicksPerSecond * 30)
+                {
+                    Logger.Log.DebugF($"[{LOG_TAG}] Estadísticas - Nodos: {TotalNodes}, Activos: {ActiveNodes}");
+                    _lastLogTime = currentTime;
+                }
+
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[DHT] Periodic work error: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en trabajo periódico: {ex.Message}");
             }
         }
+
+        
 
         /// <summary>
         /// Cerrar DHT y liberar recursos

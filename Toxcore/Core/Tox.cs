@@ -67,6 +67,9 @@ namespace ToxCore.Core
     /// </summary>
     public class Tox : IDisposable
     {
+        private const string LOG_TAG = "TOX";
+        private long _lastLogTime = 0;
+
         public const string TOX_VERSION = "1.2.5";
         public const int TOX_ADDRESS_SIZE = 38;
         public const int TOX_MAX_NAME_LENGTH = 128;
@@ -132,6 +135,7 @@ namespace ToxCore.Core
             {
                 LoadFromSaveData(options.SavedData);
             }
+            Logger.Log.InfoF($"[{LOG_TAG}] Cliente Tox inicializado - Address: {GetAddress().Substring(0, 16)}...");
         }
 
         // ==================== FUNCIONES COMPATIBLES CON C ORIGINAL ====================
@@ -175,10 +179,17 @@ namespace ToxCore.Core
                 ProcessNetworkPackets();
 
                 _lastIterationTime = currentTime;
+
+                if ((currentTime - _lastLogTime) > TimeSpan.TicksPerSecond * 120)
+                {
+                    Logger.Log.InfoF($"[{LOG_TAG}] Estado - Conexión: {ConnectionStatus}, Amigos: {FriendCount}, Online: {OnlineFriendCount}");
+                    _lastLogTime = currentTime;
+                }
+
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // Silenciar errores en iteración
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en iteración: {ex.Message}");
             }
         }
 
@@ -195,6 +206,8 @@ namespace ToxCore.Core
         /// </summary>
         public bool tox_bootstrap(string host, ushort port, byte[] public_key)
         {
+            Logger.Log.InfoF($"[{LOG_TAG}] Bootstrap a {host}:{port}");
+
             if (public_key == null || public_key.Length != 32) return false;
 
             try
@@ -209,13 +222,16 @@ namespace ToxCore.Core
                     // Iniciar servicios
                     _onion.Start();
                     _isRunning = true;
+                    Logger.Log.InfoF($"[{LOG_TAG}] Bootstrap exitoso a {host}:{port}");
                     return true;
                 }
 
+                Logger.Log.WarningF($"[{LOG_TAG}] Bootstrap falló a {host}:{port}");
                 return false;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en bootstrap: {ex.Message}");
                 return false;
             }
         }
@@ -249,6 +265,8 @@ namespace ToxCore.Core
         /// </summary>
         public bool tox_self_set_name(string name)
         {
+            Logger.Log.InfoF($"[{LOG_TAG}] Estableciendo nombre: {name}");
+
             if (name == null || name.Length > TOX_MAX_NAME_LENGTH) return false;
 
             try
@@ -257,10 +275,12 @@ namespace ToxCore.Core
                 // CORREGIDO: Convertir FriendUserStatus a ToxUserStatus
                 _friendConn.m_set_status_message(name);
                 Callbacks.OnFriendName?.Invoke(-1, name); // -1 indica self
+                Logger.Log.InfoF($"[{LOG_TAG}] Nombre establecido: {name}");
                 return true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error estableciendo nombre: {ex.Message}");
                 return false;
             }
         }
@@ -371,6 +391,8 @@ namespace ToxCore.Core
         /// </summary>
         public int tox_friend_add(byte[] address, string message)
         {
+            Logger.Log.InfoF($"[{LOG_TAG}] Agregando amigo por dirección - Mensaje: {message}");
+
             if (address == null || address.Length != TOX_ADDRESS_SIZE) return -1;
             if (message == null || message.Length == 0) return -1;
 
@@ -385,12 +407,18 @@ namespace ToxCore.Core
                 if (friendNumber >= 0)
                 {
                     Callbacks.OnFriendAdded?.Invoke(friendNumber);
+                    Logger.Log.InfoF($"[{LOG_TAG}] Amigo agregado: {friendNumber}");
+                }
+                else
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Falló agregar amigo por dirección");
                 }
 
                 return friendNumber;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error agregando amigo: {ex.Message}");
                 return -1;
             }
         }

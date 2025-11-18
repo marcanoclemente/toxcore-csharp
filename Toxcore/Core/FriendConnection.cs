@@ -72,6 +72,9 @@ namespace ToxCore.Core
     /// </summary>
     public class FriendConnection
     {
+        private const string LOG_TAG = "FRIEND";
+        private long _lastLogTime = 0;
+
         public const int MAX_FRIEND_COUNT = 500;
         public const int FRIEND_CONNECTION_TIMEOUT = 60000;
         public const int FRIEND_PING_INTERVAL = 30000;
@@ -124,6 +127,7 @@ namespace ToxCore.Core
             _lastFriendNumber = 0;
             _lastMaintenanceTime = DateTime.UtcNow.Ticks;
             Callbacks = new FriendCallbacks();
+            Logger.Log.InfoF($"[{LOG_TAG}] FriendConnection inicializado");
         }
 
         // ==================== FUNCIONES COMPATIBLES CON C ORIGINAL ====================
@@ -133,6 +137,8 @@ namespace ToxCore.Core
         /// </summary>
         public int m_addfriend(byte[] public_key)
         {
+            Logger.Log.InfoF($"[{LOG_TAG}] Agregando nuevo amigo [PK: {BitConverter.ToString(public_key, 0, 8).Replace("-", "")}...]");
+
             if (public_key == null || public_key.Length != 32) return -1;
 
             try
@@ -141,7 +147,11 @@ namespace ToxCore.Core
                 {
                     // Verificar si el amigo ya existe
                     var existingFriend = _friends.Find(f => ByteArraysEqual(public_key, f.PublicKey));
-                    if (existingFriend.PublicKey != null) return -1;
+                    if (existingFriend.PublicKey != null)
+                    {
+                        Logger.Log.WarningF($"[{LOG_TAG}] Amigo ya existe: {existingFriend.FriendNumber}");
+                        return -1;
+                    }
 
                     // Verificar límite de amigos
                     if (_friends.Count >= MAX_FRIEND_COUNT) return -1;
@@ -150,14 +160,17 @@ namespace ToxCore.Core
                     var newFriend = new Friend(_lastFriendNumber++, public_key);
                     _friends.Add(newFriend);
 
+                    Logger.Log.InfoF($"[{LOG_TAG}] Nuevo amigo agregado: {newFriend.FriendNumber} [Total: {_friends.Count}]");
+
                     // Intentar conectar inmediatamente
                     friendconn_connect(newFriend.FriendNumber);
 
                     return newFriend.FriendNumber;
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error agregando amigo: {ex.Message}");
                 return -1;
             }
         }
@@ -192,6 +205,8 @@ namespace ToxCore.Core
         /// </summary>
         public int m_send_message(int friend_number, byte[] message, int length)
         {
+            Logger.Log.DebugF($"[{LOG_TAG}] Enviando mensaje a amigo {friend_number} - Tamaño: {length} bytes");
+
             if (message == null || length > 1372) return -1; // MAX_MESSAGE_LENGTH en toxcore
 
             try
@@ -199,7 +214,11 @@ namespace ToxCore.Core
                 lock (_friendsLock)
                 {
                     var friend = _friends.Find(f => f.FriendNumber == friend_number);
-                    if (friend.PublicKey == null || !friend.IsOnline) return -1;
+                    if (friend.PublicKey == null || !friend.IsOnline)
+                    {
+                        Logger.Log.WarningF($"[{LOG_TAG}] Amigo {friend_number} no disponible para envío");
+                        return -1;
+                    }
 
                     // Crear paquete de mensaje
                     byte[] packet = CreateMessagePacket(message, length);
@@ -210,14 +229,17 @@ namespace ToxCore.Core
                     if (sent > 0)
                     {
                         friend.LastSeen = DateTime.UtcNow.Ticks;
+                        Logger.Log.TraceF($"[{LOG_TAG}] Mensaje enviado a amigo {friend_number}: {sent} bytes");
                         return sent;
                     }
 
+                    Logger.Log.WarningF($"[{LOG_TAG}] Falló envío a amigo {friend_number}");
                     return -1;
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error enviando mensaje: {ex.Message}");
                 return -1;
             }
         }
@@ -348,6 +370,8 @@ namespace ToxCore.Core
         /// </summary>
         public int friend_new_connection(int friend_number)
         {
+            Logger.Log.InfoF($"[{LOG_TAG}] Nueva conexión con amigo {friend_number}");
+
             try
             {
                 lock (_friendsLock)
@@ -362,11 +386,13 @@ namespace ToxCore.Core
                     // Notificar callback
                     Callbacks.OnConnectionStatusChanged?.Invoke(friend_number, FriendConnectionStatus.FRIENDCONN_STATUS_CONNECTED);
 
+                    Logger.Log.InfoF($"[{LOG_TAG}] Amigo {friend_number} conectado [Online: {_friends.Count(f => f.IsOnline)}]");
                     return 0;
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en nueva conexión: {ex.Message}");
                 return -1;
             }
         }
@@ -622,42 +648,56 @@ namespace ToxCore.Core
         /// </summary>
         public void Do_periodic_work()
         {
-            long currentTime = DateTime.UtcNow.Ticks;
-
-            lock (_friendsLock)
+            try
             {
-                // CORREGIDO: Usar for loop en lugar de foreach para modificar elementos
-                for (int i = 0; i < _friends.Count; i++)
+                long currentTime = DateTime.UtcNow.Ticks;
+
+                lock (_friendsLock)
                 {
-                    var friend = _friends[i];
-
-                    // Enviar ping a amigos conectados
-                    if (friend.IsOnline && (currentTime - friend.LastPingSent) > TimeSpan.TicksPerMillisecond * FRIEND_PING_INTERVAL)
+                    // CORREGIDO: Usar for loop en lugar de foreach para modificar elementos
+                    for (int i = 0; i < _friends.Count; i++)
                     {
-                        byte[] pingPacket = CreatePingPacket(friend.PingId);
+                        var friend = _friends[i];
 
-                        // Enviar ping
-                        m_send_message(friend.FriendNumber, pingPacket, pingPacket.Length);
+                        // Enviar ping a amigos conectados
+                        if (friend.IsOnline && (currentTime - friend.LastPingSent) > TimeSpan.TicksPerMillisecond * FRIEND_PING_INTERVAL)
+                        {
+                            byte[] pingPacket = CreatePingPacket(friend.PingId);
 
-                        // Actualizar friend con nuevo estado
-                        var updatedFriend = friend;
-                        updatedFriend.PingId++; // Incrementar aquí, no en la llamada
-                        updatedFriend.LastPingSent = currentTime;
-                        _friends[i] = updatedFriend;
+                            // Enviar ping
+                            m_send_message(friend.FriendNumber, pingPacket, pingPacket.Length);
+
+                            // Actualizar friend con nuevo estado
+                            var updatedFriend = friend;
+                            updatedFriend.PingId++; // Incrementar aquí, no en la llamada
+                            updatedFriend.LastPingSent = currentTime;
+                            _friends[i] = updatedFriend;
+                        }
+
+                        // Verificar timeouts
+                        if (friend.IsOnline && (currentTime - friend.LastSeen) > TimeSpan.TicksPerMillisecond * FRIEND_CONNECTION_TIMEOUT)
+                        {
+                            UpdateFriendStatus(friend.FriendNumber, FriendConnectionStatus.FRIENDCONN_STATUS_DISCONNECTED);
+                        }
+
+                        if ((currentTime - _lastLogTime) > TimeSpan.TicksPerSecond * 60)
+                        {
+                            Logger.Log.DebugF($"[{LOG_TAG}] Estadísticas - Amigos: {_friends.Count}, Online: {_friends.Count(f => f.IsOnline)}");
+                            _lastLogTime = currentTime;
+                        }
                     }
 
-                    // Verificar timeouts
-                    if (friend.IsOnline && (currentTime - friend.LastSeen) > TimeSpan.TicksPerMillisecond * FRIEND_CONNECTION_TIMEOUT)
-                    {
-                        UpdateFriendStatus(friend.FriendNumber, FriendConnectionStatus.FRIENDCONN_STATUS_DISCONNECTED);
-                    }
+                }
+
+                // Ejecutar mantenimiento cada 30 segundos
+                if ((currentTime - _lastMaintenanceTime) > TimeSpan.TicksPerSecond * 30)
+                {
+                    _lastMaintenanceTime = currentTime;
                 }
             }
-
-            // Ejecutar mantenimiento cada 30 segundos
-            if ((currentTime - _lastMaintenanceTime) > TimeSpan.TicksPerSecond * 30)
+            catch (Exception ex)
             {
-                _lastMaintenanceTime = currentTime;
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en trabajo periódico: {ex.Message}");
             }
         }
 
