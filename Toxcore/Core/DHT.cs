@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Net;
 using System.Runtime.InteropServices;
-using ToxCore.Core;
 
 namespace ToxCore.Core
 {
@@ -86,6 +85,15 @@ namespace ToxCore.Core
     public class DHT
     {
         private const string LOG_TAG = "DHT";
+        private long _lastCleanupTime = 0;
+
+        private DateTime _lastCleanup = DateTime.UtcNow;
+        private readonly TimeSpan _cleanupInterval = TimeSpan.FromMinutes(2);
+
+        private readonly Dictionary<string, List<DHTNode>> _closestNodesCache = new Dictionary<string, List<DHTNode>>();
+        private readonly TimeSpan _cacheTTL = TimeSpan.FromSeconds(30);
+        private readonly object _cacheLock = new object();
+        private DateTime _lastCacheCleanup = DateTime.UtcNow;
 
         public const int MAX_FRIEND_CLOSE = 8;
         public const int MAX_CLOSE_TO_BOOTSTRAP_NODES = 16;
@@ -322,6 +330,42 @@ namespace ToxCore.Core
             return true;
         }
 
+
+        /// <summary>
+        /// Versión cacheada de GetClosestNodes
+        /// </summary>
+        public List<DHTNode> GetClosestNodesCached(byte[] targetPublicKey, int maxNodes = 8)
+        {
+            string cacheKey = BitConverter.ToString(targetPublicKey).Replace("-", "");
+
+            lock (_cacheLock)
+            {
+                // Limpiar cache periódicamente
+                if (DateTime.UtcNow - _lastCacheCleanup > TimeSpan.FromMinutes(1))
+                {
+                    _closestNodesCache.Clear();
+                    _lastCacheCleanup = DateTime.UtcNow;
+                }
+
+                // Devolver resultado cacheado si existe y es reciente
+                if (_closestNodesCache.TryGetValue(cacheKey, out var cached) &&
+                    cached != null)
+                {
+                    Logger.Log.TraceF($"[{LOG_TAG}] Cache hit para búsqueda de nodos");
+                    return cached.Take(maxNodes).ToList();
+                }
+            }
+
+            // Calcular y cachear resultado
+            var result = GetClosestNodes(targetPublicKey, maxNodes);
+
+            lock (_cacheLock)
+            {
+                _closestNodesCache[cacheKey] = result;
+            }
+
+            return result;
+        }
 
         /// <summary>
         /// Obtener nodos más cercanos a una clave
@@ -756,7 +800,129 @@ namespace ToxCore.Core
             }
         }
 
-        
+        private void SimpleCleanup()
+        {
+            if (DateTime.UtcNow - _lastCleanup < TimeSpan.FromMinutes(2))
+                return;
+
+            try
+            {
+                lock (_nodesLock)
+                {
+                    // Limpieza simple - solo marcar como inactivos, no remover
+                    foreach (var node in _nodes)
+                    {
+                        if (!node.IsActive)
+                        {
+                            // Ya está inactivo, no hacer nada
+                        }
+                    }
+                }
+                _lastCleanup = DateTime.UtcNow;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.WarningF($"[{LOG_TAG}] Error en limpieza simple: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Limpieza mínima y segura - solo marca nodos, no los remueve
+        /// </summary>
+        private void SafeCleanup()
+        {
+            long currentTime = DateTime.UtcNow.Ticks;
+
+            // Solo ejecutar cada 2 minutos
+            if (currentTime - _lastCleanupTime < TimeSpan.TicksPerMinute * 2)
+                return;
+
+            try
+            {
+                int markedInactive = 0;
+                lock (_nodesLock)
+                {
+                    // Solo marcar nodos como inactivos, no remover
+                    foreach (var node in _nodes)
+                    {
+                        // Usar comparación con ticks (compatible con tu código)
+                        long inactiveThreshold = currentTime - TimeSpan.TicksPerHour;
+                        if (node.IsActive && node.LastSeen < inactiveThreshold)
+                        {
+                            node.IsActive = false;
+                            markedInactive++;
+                        }
+                    }
+                }
+
+                if (markedInactive > 0)
+                {
+                    Logger.Log.DebugF($"[{LOG_TAG}] Limpieza segura - Nodos marcados inactivos: {markedInactive}");
+                }
+
+                _lastCleanupTime = currentTime;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.WarningF($"[{LOG_TAG}] Error en limpieza segura: {ex.Message}");
+            }
+        }
+
+
+        /// <summary>
+        /// Optimización: Limpieza periódica de nodos inactivos
+        /// </summary>
+        private void OptimizedCleanup()
+        {
+            if (DateTime.UtcNow - _lastCleanup < _cleanupInterval)
+                return;
+
+            try
+            {
+                lock (_nodesLock)
+                {
+                    int initialCount = _nodes.Count;
+
+                    // Usar ticks para comparación (compatible con tu código)
+                    long cutoffTime = DateTime.UtcNow.AddHours(-1).Ticks;
+
+                    _nodes.RemoveAll(node =>
+                        !node.IsActive &&
+                        node.LastSeen < cutoffTime);
+
+                    int removed = initialCount - _nodes.Count;
+                    if (removed > 0)
+                    {
+                        Logger.Log.DebugF($"[{LOG_TAG}] Limpieza optimizada - Nodos removidos: {removed}");
+                    }
+                }
+
+                _lastCleanup = DateTime.UtcNow;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.WarningF($"[{LOG_TAG}] Error en limpieza optimizada: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Versión optimizada de DoPeriodicWork
+        /// </summary>
+        public void DoPeriodicWorkOptimized()
+        {
+            try
+            {
+                // 1. Limpieza optimizada
+                OptimizedCleanup();
+
+                // 2. Procesamiento normal (usando tu implementación actual)
+                DoPeriodicWork();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en trabajo periódico optimizado: {ex.Message}");
+            }
+        }
 
         /// <summary>
         /// Cerrar DHT y liberar recursos
@@ -787,4 +953,10 @@ namespace ToxCore.Core
             Console.WriteLine($"  Socket: {(Socket == -1 ? "Closed" : "Open")}");
         }
     }
+
+
+    
+
+
 }
+

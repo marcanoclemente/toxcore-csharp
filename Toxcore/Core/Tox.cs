@@ -20,12 +20,14 @@ namespace ToxCore.Core
         UDP = 2
     }
 
+    /*
     public enum ToxUserStatus
     {
         NONE = 0,
         AWAY = 1,
         BUSY = 2
     }
+    */
 
     /// <summary>
     /// Opciones de configuración de Tox compatibles con toxcore

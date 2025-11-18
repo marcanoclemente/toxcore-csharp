@@ -24,6 +24,9 @@ namespace ToxCore.Core
         private readonly object _connectionsLock = new object();
         private int _lastConnectionID;
 
+        private readonly List<TcpClient> _activeConnections = new List<TcpClient>();
+        private DateTime _lastConnectionCleanup = DateTime.UtcNow;
+
         public int ConnectionCount
         {
             get
@@ -338,6 +341,7 @@ namespace ToxCore.Core
             }
         }
 
+       
         /// <summary>
         /// Do_periodic_work - Mantenimiento del servidor
         /// </summary>
