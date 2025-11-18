@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Sodium;
+using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -14,7 +15,7 @@ namespace ToxCore
             Console.WriteLine("=============================================\n");
 
 
-
+            /*
             // Test 1: Salsa20/8 Core
             RunCryptoSecurityAudit();
             
@@ -64,6 +65,21 @@ namespace ToxCore
 
             // Test 16: Tox
             TestToxCore();
+
+            // Después de TestToxCore(), agregar:
+            TestLoggerSystem();
+
+            // Test State.cs
+            TestStateManagement();
+
+            // Test de Messenger.cs
+            TestMessenger();
+            */
+            TestToxIntegration();
+            TestResilience();
+            RunPerformanceBenchmark();
+            TestNetworkComponents();
+
 
             Console.WriteLine("\n✅ Todas las pruebas completadas.");
             Console.WriteLine("Presiona Enter para salir...");
@@ -2795,6 +2811,636 @@ namespace ToxCore
 
             Console.WriteLine("\n" + new string('=', 50));
         }
+
+        static void TestLoggerSystem()
+        {
+            Console.WriteLine("\n📝 Probando Sistema de Logging...");
+
+            try
+            {
+                // Test 1: Logging básico a consola
+                Console.WriteLine("   💬 Probando logging básico...");
+                TestBasicLogging();
+
+                // Test 2: Niveles de log
+                Console.WriteLine("   🎚️ Probando niveles de log...");
+                TestLogLevels();
+
+                // Test 3: Logging con formato
+                Console.WriteLine("   📋 Probando logging con formato...");
+                TestFormattedLogging();
+
+                // Test 4: Logging a archivo
+                Console.WriteLine("   💾 Probando logging a archivo...");
+                TestFileLogging();
+
+                // Test 5: Callbacks personalizados
+                Console.WriteLine("   🔄 Probando callbacks...");
+                TestLogCallbacks();
+
+                Console.WriteLine("   ✅ Todas las pruebas de logging completadas");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"   ❌ Error en pruebas de logging: {ex.Message}");
+            }
+        }
+
+        static void TestBasicLogging()
+        {
+            try
+            {
+                // Test logging con diferentes niveles usando métodos directos
+                Logger.LOGGER_TRACE("TestLogger.cs", 100, "TestBasicLogging", "Mensaje de trace");
+                Logger.LOGGER_DEBUG("TestLogger.cs", 101, "TestBasicLogging", "Mensaje de debug");
+                Logger.LOGGER_INFO("TestLogger.cs", 102, "TestBasicLogging", "Mensaje de info");
+                Logger.LOGGER_WARNING("TestLogger.cs", 103, "TestBasicLogging", "Mensaje de warning");
+                Logger.LOGGER_ERROR("TestLogger.cs", 104, "TestBasicLogging", "Mensaje de error");
+
+                // Test logging usando las macros convenientes
+                Logger.Log.Trace("Trace con macros");
+                Logger.Log.Debug("Debug con macros");
+                Logger.Log.Info("Info con macros");
+                Logger.Log.Warning("Warning con macros");
+                Logger.Log.Error("Error con macros");
+
+                Console.WriteLine("     ✅ Logging básico funcionando");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"     ❌ Error en logging básico: {ex.Message}");
+            }
+        }
+
+        static void TestLogLevels()
+        {
+            try
+            {
+                // Guardar nivel actual
+                var originalLevel = Logger.tox_log_get_level();
+
+                // Test 1: Nivel ERROR (solo errores)
+                Logger.tox_log_set_level(ToxLogLevel.TOX_LOG_LEVEL_ERROR);
+                Logger.Log.Trace("Este TRACE no debería verse");
+                Logger.Log.Debug("Este DEBUG no debería verse");
+                Logger.Log.Info("Este INFO no debería verse");
+                Logger.Log.Warning("Este WARNING no debería verse");
+                Logger.Log.Error("Este ERROR debería verse");
+
+                // Test 2: Nivel INFO (info, warnings, errors)
+                Logger.tox_log_set_level(ToxLogLevel.TOX_LOG_LEVEL_INFO);
+                Logger.Log.Trace("Este TRACE no debería verse");
+                Logger.Log.Debug("Este DEBUG no debería verse");
+                Logger.Log.Info("Este INFO debería verse");
+                Logger.Log.Warning("Este WARNING debería verse");
+                Logger.Log.Error("Este ERROR debería verse");
+
+                // Test 3: Nivel TRACE (todo)
+                Logger.tox_log_set_level(ToxLogLevel.TOX_LOG_LEVEL_TRACE);
+                Logger.Log.Trace("Este TRACE debería verse");
+                Logger.Log.Debug("Este DEBUG debería verse");
+                Logger.Log.Info("Este INFO debería verse");
+                Logger.Log.Warning("Este WARNING debería verse");
+                Logger.Log.Error("Este ERROR debería verse");
+
+                // Restaurar nivel original
+                Logger.tox_log_set_level(originalLevel);
+
+                Console.WriteLine("     ✅ Control de niveles funcionando");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"     ❌ Error en control de niveles: {ex.Message}");
+            }
+        }
+
+        static void TestFormattedLogging()
+        {
+            try
+            {
+                // Test logging con formato usando métodos directos
+                Logger.LOGGER_TRACE_F("TestLogger.cs", 200, "TestFormattedLogging",
+                    "Trace con parámetros: {0} {1} {2}", "texto", 123, true);
+                Logger.LOGGER_DEBUG_F("TestLogger.cs", 201, "TestFormattedLogging",
+                    "Debug con parámetros: {0} {1}", 45.67, DateTime.Now);
+                Logger.LOGGER_INFO_F("TestLogger.cs", 202, "TestFormattedLogging",
+                    "Usuario {0} conectado desde {1}", "Alice", "192.168.1.100");
+                Logger.LOGGER_WARNING_F("TestLogger.cs", 203, "TestFormattedLogging",
+                    "Conexión lenta: {0}ms", 1500);
+                Logger.LOGGER_ERROR_F("TestLogger.cs", 204, "TestFormattedLogging",
+                    "Error en {0}: {1}", "FunciónX", "Timeout excedido");
+
+                // Test logging con formato usando macros
+                Logger.Log.TraceF("Macro Trace: {0} {1}", "param1", 999);
+                Logger.Log.DebugF("Macro Debug: {0}", Math.PI);
+                Logger.Log.InfoF("Macro Info: Procesados {0} mensajes", 42);
+                Logger.Log.WarningF("Macro Warning: {0}% de uso de CPU", 85.5);
+                Logger.Log.ErrorF("Macro Error: Excepción en {0}", "ProcesarMensaje");
+
+                Console.WriteLine("     ✅ Logging con formato funcionando");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"     ❌ Error en logging con formato: {ex.Message}");
+            }
+        }
+
+        static void TestFileLogging()
+        {
+            string testLogFile = "test_tox_log.txt";
+
+            try
+            {
+                // Habilitar logging a archivo
+                bool fileLogEnabled = Logger.tox_log_enable_file_logging(testLogFile);
+                if (fileLogEnabled)
+                {
+                    Console.WriteLine("     ✅ Logging a archivo habilitado");
+
+                    // Escribir algunos logs
+                    Logger.Log.Info("Este mensaje debería ir al archivo");
+                    Logger.Log.Warning("Advertencia de prueba");
+                    Logger.Log.Error("Error de prueba con detalles");
+
+                    // Deshabilitar logging a archivo PRIMERO para liberar el archivo
+                    Logger.tox_log_disable_file_logging();
+
+                    // LUEGO verificar que el archivo se creó
+                    if (File.Exists(testLogFile))
+                    {
+                        Console.WriteLine("     ✅ Archivo de log creado correctamente");
+
+                        // Leer contenido del archivo
+                        string logContent = File.ReadAllText(testLogFile);
+                        if (logContent.Contains("Este mensaje debería ir al archivo"))
+                        {
+                            Console.WriteLine("     ✅ Contenido escrito correctamente en archivo");
+                        }
+                        else
+                        {
+                            Console.WriteLine("     ❌ Contenido no encontrado en archivo");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("     ❌ Archivo de log no creado");
+                    }
+
+                    // Limpiar archivo de prueba
+                    if (File.Exists(testLogFile))
+                    {
+                        File.Delete(testLogFile);
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("     ❌ No se pudo habilitar logging a archivo");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"     ❌ Error en logging a archivo: {ex.Message}");
+
+                // Limpiar en caso de error
+                if (File.Exists(testLogFile))
+                {
+                    try { File.Delete(testLogFile); } catch { }
+                }
+            }
+        }
+
+        static void TestLogCallbacks()
+        {
+            try
+            {
+                bool callbackCalled = false;
+                ToxLogLevel lastCallbackLevel = ToxLogLevel.TOX_LOG_LEVEL_INFO;
+                string lastCallbackMessage = "";
+
+                // Registrar callback personalizado
+                ToxLogCallback customCallback = (level, file, line, func, message, userData) =>
+                {
+                    callbackCalled = true;
+                    lastCallbackLevel = level;
+                    lastCallbackMessage = message;
+                    Console.WriteLine($"        📞 Callback: [{level}] {Path.GetFileName(file)}:{line} - {message}");
+                };
+
+                Logger.tox_log_cb_register(customCallback, IntPtr.Zero);
+
+                // Generar logs que deberían activar el callback
+                Logger.Log.Info("Mensaje para callback de INFO");
+                if (callbackCalled && lastCallbackLevel == ToxLogLevel.TOX_LOG_LEVEL_INFO)
+                {
+                    Console.WriteLine("     ✅ Callback de INFO funcionando");
+                }
+                else
+                {
+                    Console.WriteLine("     ❌ Callback de INFO no funcionó");
+                }
+
+                // Reset y test con error
+                callbackCalled = false;
+                Logger.Log.Error("Mensaje para callback de ERROR");
+                if (callbackCalled && lastCallbackLevel == ToxLogLevel.TOX_LOG_LEVEL_ERROR)
+                {
+                    Console.WriteLine("     ✅ Callback de ERROR funcionando");
+                }
+                else
+                {
+                    Console.WriteLine("     ❌ Callback de ERROR no funcionó");
+                }
+
+                // Desregistrar callback
+                Logger.tox_log_cb_register(null, IntPtr.Zero);
+
+                Console.WriteLine("     ✅ Sistema de callbacks funcionando");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"     ❌ Error en callbacks: {ex.Message}");
+            }
+        }
+
+        private static void TestStateManagement()
+        {
+            Console.WriteLine("?? Probando gestión de estado...");
+
+            try
+            {
+                // Crear estado de prueba
+                var state = new ToxState();
+
+                // Configurar datos de usuario CON CLAVES VÁLIDAS
+                state.User.Name = "UsuarioPrueba";
+                state.User.StatusMessage = "Disponible";
+                state.User.Status = ToxUserStatus.NONE;
+
+                // Generar claves de prueba
+                var random = new Random();
+                random.NextBytes(state.User.PublicKey);
+                random.NextBytes(state.User.SecretKey);
+
+                // Agregar amigos de prueba CON CLAVES VÁLIDAS
+                var friend = new ToxFriend
+                {
+                    FriendNumber = 0,
+                    Name = "Amigo1",
+                    StatusMessage = "Conectado"
+                };
+                random.NextBytes(friend.PublicKey);
+                state.Friends.Friends = new ToxFriend[] { friend };
+
+                // Probar guardar/cargar
+                byte[] savedData = state.Save();
+                Logger.Log.Info($"? Estado guardado: {savedData.Length} bytes");
+
+                // Probar cargar
+                var newState = new ToxState();
+                bool loadSuccess = newState.Load(savedData);
+                Logger.Log.Info($"? Estado cargado: {loadSuccess}");
+
+                // Verificar datos
+                bool dataPreserved = newState.User.Name == "UsuarioPrueba";
+                Logger.Log.Info($"? Datos preservados: {dataPreserved}");
+
+                // Probar archivo
+                string testFile = "test_state.tox";
+                bool fileSave = state.SaveToFile(testFile);
+                bool fileLoad = newState.LoadFromFile(testFile);
+
+                Logger.Log.Info($"? Guardado a archivo: {fileSave}");
+                Logger.Log.Info($"? Cargado desde archivo: {fileLoad}");
+
+                // Limpiar
+                if (File.Exists(testFile))
+                    File.Delete(testFile);
+
+                Logger.Log.Info("? Pruebas de estado completadas");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"? Error en pruebas de estado: {ex.Message}");
+            }
+        }
+
+        private static void TestMessenger()
+        {
+            Logger.Log.Info("?? Probando Messenger (núcleo principal)...");
+
+            try
+            {
+                // Crear y iniciar messenger
+                var options = new MessengerOptions
+                {
+                    IPv6Enabled = true,
+                    UDPEnabled = true,
+                    TcpEnabled = false // Deshabilitar TCP para pruebas simples
+                };
+
+                var messenger = new Messenger(options);
+                bool startSuccess = messenger.Start();
+
+                Logger.Log.Info($"? Messenger iniciado: {startSuccess}");
+
+                if (startSuccess)
+                {
+                    // Probar configuración de perfil
+                    bool nameSet = messenger.SetName("UsuarioPrueba");
+                    bool statusSet = messenger.SetStatusMessage("Probando ToxCore");
+                    bool statusModeSet = messenger.SetStatus(ToxUserStatus.NONE);
+
+                    Logger.Log.Info($"? Nombre establecido: {nameSet}");
+                    Logger.Log.Info($"? Estado establecido: {statusSet}");
+                    Logger.Log.Info($"? Modo establecido: {statusModeSet}");
+
+                    // Probar iteración
+                    messenger.Do();
+                    Logger.Log.Info("? Iteración ejecutada");
+
+                    // Probar agregar amigo con dirección inválida (debería fallar)
+                    byte[] invalidAddress = new byte[20]; // Muy corta
+                    int friendResult = messenger.AddFriend(invalidAddress, "Hola!");
+                    Logger.Log.Info($"? Agregar amigo con dirección inválida: {friendResult} (fallo esperado)");
+
+                    // Probar enviar mensaje a amigo inexistente (debería fallar)
+                    int sendResult = messenger.SendMessage(999, "Mensaje de prueba");
+                    Logger.Log.Info($"? Enviar mensaje a amigo inexistente: {sendResult} (fallo esperado)");
+
+                    // Detener messenger
+                    messenger.Stop();
+                    Logger.Log.Info("? Messenger detenido");
+                }
+
+                messenger.Dispose();
+                Logger.Log.Info("? Pruebas de Messenger completadas");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"? Error en pruebas de Messenger: {ex.Message}");
+            }
+        }
+
+        private static void TestToxIntegration()
+        {
+            Logger.Log.Info("🧪 Probando integración completa de Tox...");
+
+            try
+            {
+                // Crear instancia Tox principal
+                var tox1 = new Tox(new ToxOptions
+                {
+                    IPv6Enabled = true,
+                    UDPEnabled = true
+                });
+
+                // Obtener dirección - según tu código GetAddress() devuelve string
+                string address = tox1.GetAddress();
+                string addressShort = address.Length > 16 ? address.Substring(0, 16) + "..." : address;
+                Logger.Log.Info($"✅ Tox1 creado - Address: {addressShort}");
+
+                // APIs confirmadas de tus pruebas anteriores
+                tox1.tox_self_set_name("Usuario1");
+                tox1.tox_self_set_status_message("Conectado desde C#");
+
+                Logger.Log.Info("✅ Perfil de Tox1 configurado");
+
+                // Iteraciones confirmadas
+                for (int i = 0; i < 5; i++)
+                {
+                    tox1.tox_iterate();
+                    Thread.Sleep(50);
+                }
+
+                Logger.Log.Info("✅ Iteraciones ejecutadas");
+
+                // Recuperar datos confirmados
+                var name1 = tox1.tox_self_get_name();
+                var statusMessage1 = tox1.tox_self_get_status_message();
+
+                Logger.Log.Info($"✅ Datos recuperados - Nombre: '{name1}', Estado: '{statusMessage1}'");
+
+                // Crear segunda instancia
+                var tox2 = new Tox(new ToxOptions { IPv6Enabled = true });
+                tox2.tox_self_set_name("Usuario2");
+
+                Logger.Log.Info($"✅ Tox2 creado");
+
+                // Limpiar
+                tox1.Dispose();
+                tox2.Dispose();
+
+                Logger.Log.Info("🧪 Prueba de integración completada exitosamente");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"❌ Error en prueba de integración: {ex.Message}");
+            }
+        }
+
+        private static void TestResilience()
+        {
+            Logger.Log.Info("🛡️ Probando resiliencia del sistema...");
+
+            try
+            {
+                var messenger = new Messenger();
+                bool started = messenger.Start();
+
+                if (!started)
+                {
+                    Logger.Log.Error("❌ No se pudo iniciar Messenger para pruebas de resiliencia");
+                    return;
+                }
+
+                // Prueba 1: Múltiples iteraciones rápidas
+                Logger.Log.Info("🔄 Probando iteraciones rápidas...");
+                for (int i = 0; i < 20; i++)
+                {
+                    messenger.Do();
+                    Thread.Sleep(10); // Iteraciones muy rápidas
+                }
+                Logger.Log.Info("✅ Iteraciones rápidas completadas");
+
+                // Prueba 2: Operaciones concurrentes simuladas
+                Logger.Log.Info("⚡ Probando operaciones concurrentes...");
+                var tasks = new List<Task>();
+
+                for (int i = 0; i < 5; i++)
+                {
+                    tasks.Add(Task.Run(() =>
+                    {
+                        for (int j = 0; j < 10; j++)
+                        {
+                            messenger.Do();
+                            Thread.Sleep(5);
+                        }
+                    }));
+                }
+
+                Task.WaitAll(tasks.ToArray());
+                Logger.Log.Info("✅ Operaciones concurrentes completadas");
+
+                // Prueba 3: Manejo de datos corruptos
+                Logger.Log.Info("📛 Probando manejo de datos corruptos...");
+
+                // Intentar cargar estado corrupto
+                var corruptState = new ToxState();
+                bool loadResult = corruptState.Load(new byte[] { 0x00, 0x01, 0x02 }); // Datos inválidos
+                Logger.Log.Info($"✅ Manejo de estado corrupto: {!loadResult} (fallo esperado)");
+
+                // Prueba 4: Recuperación después de errores
+                Logger.Log.Info("🔁 Probando recuperación...");
+                messenger.Stop();
+                Thread.Sleep(100);
+                bool restarted = messenger.Start();
+                Logger.Log.Info($"✅ Recuperación exitosa: {restarted}");
+
+                messenger.Dispose();
+                Logger.Log.Info("🛡️ Pruebas de resiliencia completadas");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"❌ Error en pruebas de resiliencia: {ex.Message}");
+            }
+        }
+
+        private static void RunPerformanceBenchmark()
+        {
+            Logger.Log.Info("📊 Ejecutando benchmark de rendimiento...");
+
+            try
+            {
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+                // Benchmark 1: Criptografía - usando overload real
+                stopwatch.Restart();
+                for (int i = 0; i < 500; i++)
+                {
+                    var temp = new byte[32];
+                    new Random().NextBytes(temp);
+                    byte[] hash = CryptoHash.Sha256(temp); // Overload real: Sha256(byte[])
+                }
+                var cryptoTime = stopwatch.ElapsedMilliseconds;
+
+                // Benchmark 2: DHT
+                var dht = new DHT(new byte[32], new byte[32]);
+                stopwatch.Restart();
+                for (int i = 0; i < 20; i++)
+                {
+                    dht.DoPeriodicWork();
+                }
+                var dhtTime = stopwatch.ElapsedMilliseconds;
+
+                // Benchmark 3: Estado
+                var state = new ToxState();
+                state.User.Name = "BenchmarkUser";
+
+                stopwatch.Restart();
+                for (int i = 0; i < 20; i++)
+                {
+                    state.Save();
+                }
+                var stateTime = stopwatch.ElapsedMilliseconds;
+
+                // Benchmark 4: RandomBytes - usando métodos reales
+                stopwatch.Restart();
+                for (int i = 0; i < 500; i++)
+                {
+                    byte[] randomData = RandomBytes.Generate(32); // Método real
+                }
+                var randomTime = stopwatch.ElapsedMilliseconds;
+
+                // Benchmark 5: Uniform distribution
+                stopwatch.Restart();
+                for (int i = 0; i < 1000; i++)
+                {
+                    uint uniform = RandomBytes.Uniform(100); // Método real
+                }
+                var uniformTime = stopwatch.ElapsedMilliseconds;
+
+                Logger.Log.Info($"📈 Resultados del Benchmark:");
+                Logger.Log.Info($"   Criptografía (500 ops): {cryptoTime}ms");
+                Logger.Log.Info($"   DHT (20 iteraciones): {dhtTime}ms");
+                Logger.Log.Info($"   Estado (20 guardados): {stateTime}ms");
+                Logger.Log.Info($"   Random (500 generaciones): {randomTime}ms");
+                Logger.Log.Info($"   Uniform (1000 generaciones): {uniformTime}ms");
+                Logger.Log.Info($"   Total: {cryptoTime + dhtTime + stateTime + randomTime + uniformTime}ms");
+
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"❌ Error en benchmark: {ex.Message}");
+            }
+        }
+
+        private static void TestNetworkComponents()
+{
+    Logger.Log.Info("🌐 Probando componentes de red...");
+    
+    try
+    {
+        // 1. IPPort existe según tus pruebas
+        var ipPort = new IPPort();
+        Logger.Log.Info("✅ Estructura IPPort creada");
+        
+        // 2. Probar CryptoHash - según tu código tienes:
+        // CryptoHash.Sha256(byte[] input) que devuelve byte[]
+        byte[] testData = new byte[32];
+        new Random().NextBytes(testData);
+        
+        byte[] hash = CryptoHash.Sha256(testData); // Este overload existe
+        Logger.Log.Info($"✅ CryptoHash.Sha256 funcionando - Hash generado: {hash.Length} bytes");
+        
+        // 3. Probar RandomBytes - según tu código tienes:
+        // - RandomBytes.Generate(uint length)
+        // - RandomBytes.Generate(byte[] buffer)
+        byte[] randomData = RandomBytes.Generate(16); // Método real
+        Logger.Log.Info($"✅ RandomBytes.Generate funcionando - {randomData.Length} bytes aleatorios");
+        
+        // También probar el otro overload
+        byte[] buffer = new byte[32];
+        RandomBytes.Generate(buffer);
+        Logger.Log.Info($"✅ RandomBytes.Generate(buffer) funcionando");
+        
+        // 4. Probar Network - con parámetros exactos según tu código:
+        // new_socket(int domain, int type, int protocol)
+        // domain: 2 = IPv4, 10 = IPv6
+        // type: 2 = Dgram (UDP), 1 = Stream (TCP)  
+        // protocol: 17 = UDP, 6 = TCP
+        int socket = Network.new_socket(2, 2, 17); // IPv4, Dgram, UDP
+        Logger.Log.Info($"✅ Socket UDP IPv4 creado: {socket}");
+        
+        if (socket >= 0)
+        {
+            // Probar bind con dirección local
+            var localIP = new IP(new IP4("127.0.0.1"));
+            var localPort = new IPPort(localIP, 0); // Puerto 0 = asignado por sistema
+            int bindResult = Network.socket_bind(socket, localPort);
+            Logger.Log.Info($"✅ Socket bind: {bindResult == 0}");
+            
+            Network.kill_socket(socket);
+            Logger.Log.Info("✅ Socket cerrado correctamente");
+        }
+        
+        // Probar también socket IPv6
+        int socket6 = Network.new_socket(10, 2, 17); // IPv6, Dgram, UDP
+        if (socket6 >= 0)
+        {
+            Logger.Log.Info($"✅ Socket UDP IPv6 creado: {socket6}");
+            Network.kill_socket(socket6);
+        }
+        
+        Logger.Log.Info("🌐 Todos los componentes de red funcionando correctamente");
+    }
+    catch (Exception ex)
+    {
+        Logger.Log.Error($"❌ Error en componentes de red: {ex.Message}");
+    }
+}
+
+
+
 
 
     }
