@@ -11,11 +11,11 @@ namespace ToxCore
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("🔬 Probando implementación de CryptoPwHash...");
-            Console.WriteLine("=============================================\n");
+            Console.WriteLine("🔬 Realizando Pruebas...");
+            Console.WriteLine("=========================\n");
 
+            RunCryptographicTests();
 
-            /*
             // Test 1: Salsa20/8 Core
             RunCryptoSecurityAudit();
             
@@ -63,8 +63,6 @@ namespace ToxCore
             // Test 15: TestFriendConnection
             TestFriendConnection();
 
-            // Test 16: Tox
-            TestToxCore();
 
             // Después de TestToxCore(), agregar:
             TestLoggerSystem();
@@ -80,11 +78,11 @@ namespace ToxCore
             TestResilience();
             RunPerformanceBenchmark();
             TestNetworkComponents();
-            */
+            
 
-            //TestLANDiscovery();
+            TestLANDiscovery();
 
-            //TestToxCompleteAPI();
+            TestToxCompleteAPI();
 
             TestGroupChats();
 
@@ -93,76 +91,82 @@ namespace ToxCore
             Console.ReadLine();
         }
 
-        static void TestSalsa208Core()
+
+        static void RunCryptographicTests()
         {
-            Console.WriteLine("1. Probando Salsa20/8 Core...");
+            Console.WriteLine("🔐 PRUEBAS CRIPTOGRÁFICAS");
+            Console.WriteLine("=========================\n");
 
-            bool testPassed = CryptoPwHash.TestSalsa208();
-            Console.WriteLine($"   Salsa20/8 básico: {(testPassed ? "✅ PASÓ" : "❌ FALLÓ")}");
+            bool allPassed = true;
 
-            // Test más detallado
+            // 1. RandomBytes
+            Console.Write("RandomBytes... ");
+            allPassed &= RunTest(RandomBytes.Test);
+
+            // 2. CryptoHashSha256  
+            Console.Write("CryptoHashSha256... ");
+            allPassed &= RunTest(CryptoHashSha256.Test);
+
+            // 3. CryptoVerify
+            Console.Write("CryptoVerify... ");
+            allPassed &= RunTest(CryptoVerify.Test);
+
+            // 4. CryptoAuth
+            Console.Write("CryptoAuth... ");
+            allPassed &= RunTest(CryptoAuth.Test);
+
+            // 5. CryptoBox
+            Console.Write("CryptoBox... ");
+            allPassed &= RunTest(CryptoBox.Test);
+
+            // 6. CryptoPwHash (CORREGIDO)
+            Console.Write("CryptoPwHash... ");
+            allPassed &= RunTest(TestCryptoPwHash);
+
+            Console.WriteLine($"\nESTADO: {(allPassed ? "✅ TODAS LAS PRUEBAS PASARON" : "❌ ALGUNAS PRUEBAS FALLARON")}");
+        }
+
+        static bool RunTest(Func<bool> test)
+        {
             try
             {
-                var salsaMethod = typeof(CryptoPwHash).GetMethod("Salsa208Core",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-
-                if (salsaMethod != null)
-                {
-                    byte[] input = new byte[64];
-                    byte[] output1 = new byte[64];
-                    byte[] output2 = new byte[64];
-
-                    // Test 1: Input específico
-                    input[0] = 0x01;
-                    salsaMethod.Invoke(null, new object[] { input, 0, output1, 0 });
-
-                    // Test 2: Mismo input debería producir mismo output
-                    input[0] = 0x01;
-                    salsaMethod.Invoke(null, new object[] { input, 0, output2, 0 });
-
-                    // Verificar determinismo
-                    bool deterministic = true;
-                    for (int i = 0; i < 64; i++)
-                    {
-                        if (output1[i] != output2[i])
-                        {
-                            deterministic = false;
-                            break;
-                        }
-                    }
-
-                    // Test 3: Input diferente debería producir output diferente
-                    input[0] = 0x02;
-                    byte[] output3 = new byte[64];
-                    salsaMethod.Invoke(null, new object[] { input, 0, output3, 0 });
-
-                    bool differentForDifferentInput = false;
-                    for (int i = 0; i < 64; i++)
-                    {
-                        if (output1[i] != output3[i])
-                        {
-                            differentForDifferentInput = true;
-                            break;
-                        }
-                    }
-
-                    Console.WriteLine($"   Transformación Salsa20: ✅ CORRECTA");
-                    Console.WriteLine($"   Comportamiento determinista: {(deterministic ? "✅" : "❌")}");
-                    Console.WriteLine($"   Outputs diferentes para inputs diferentes: {(differentForDifferentInput ? "✅" : "❌")}");
-
-                    // Mostrar sample del output
-                    Console.WriteLine($"   Sample output: {BitConverter.ToString(output1, 0, 8).Replace("-", "")}...");
-                }
-                else
-                {
-                    Console.WriteLine("   ⚠️  No se pudo acceder al método Salsa208Core");
-                }
+                bool result = test();
+                Console.WriteLine(result ? "✅" : "❌");
+                return result;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"   ❌ Error en Salsa20: {ex.Message}");
+                Console.WriteLine($"❌ ({ex.GetType().Name})");
+                return false;
             }
         }
+
+        static bool TestCryptoPwHash()
+        {
+            try
+            {
+                // Prueba básica de funcionalidad
+                var salt = CryptoPwHash.GenerateSalt();
+                var password = Encoding.UTF8.GetBytes("test_password");
+
+                var hash = CryptoPwHash.ScryptSalsa208Sha256(
+                    password, salt,
+                    CryptoPwHash.OPSLIMIT_INTERACTIVE,
+                    CryptoPwHash.MEMLIMIT_INTERACTIVE);
+
+                // Verificaciones esenciales
+                if (hash == null || hash.Length != 32) return false;
+                if (hash.All(b => b == 0)) return false; // No todo cero
+
+                // Ejecutar test completo
+                return CryptoPwHash.Test();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
 
 
         static void TestSaltGeneration()
@@ -2085,8 +2089,8 @@ namespace ToxCore
                 }
 
                 // Crear paths Onion
-                int path1 = onion.create_onion_path(dht);
-                int path2 = onion.create_onion_path(dht);
+                int path1 = onion.CreateOnionPath();
+                int path2 = onion.CreateOnionPath();
 
                 if (path1 >= 0)
                 {
