@@ -17,6 +17,7 @@ namespace ToxCore.Core
         public TCP_Server TcpServer { get; private set; }
         public FriendConnection FriendConn { get; private set; }
         public ToxState State { get; private set; }
+        public LANDiscovery LANDiscovery { get; private set; }
 
         // Configuración
         private readonly MessengerOptions _options;
@@ -67,6 +68,20 @@ namespace ToxCore.Core
                 // 5. Inicializar Friend Connection
                 FriendConn = new FriendConnection(State.User.PublicKey, State.User.SecretKey, Dht, Onion);
 
+                if (_options.EnableLANDiscovery)
+                {
+                    LANDiscovery = new LANDiscovery(State.User.PublicKey);
+
+                    // Configurar callback para agregar amigos automáticamente
+                    LANDiscovery.PeerDiscoveredCallback = OnPeerDiscovered;
+
+                    bool lanStarted = LANDiscovery.Start();
+                    if (lanStarted)
+                    {
+                        Logger.Log.Info($"[{LOG_TAG}] LAN Discovery iniciado");
+                    }
+                }
+
                 _isRunning = true;
                 Logger.Log.Info($"[{LOG_TAG}] Messenger iniciado correctamente");
                 return true;
@@ -95,12 +110,32 @@ namespace ToxCore.Core
                 Onion = null;
                 TcpServer = null;
                 Dht = null;
+                LANDiscovery?.Stop();
+                LANDiscovery?.Dispose();
 
                 Logger.Log.Info($"[{LOG_TAG}] Messenger detenido");
             }
             catch (Exception ex)
             {
                 Logger.Log.ErrorF($"[{LOG_TAG}] Error deteniendo messenger: {ex.Message}");
+            }
+        }
+
+        private void OnPeerDiscovered(DiscoveredPeer peer)
+        {
+            try
+            {
+                Logger.Log.InfoF($"[{LOG_TAG}] Peer LAN descubierto: {peer.IPAddress}");
+
+                // Intentar bootstrap con el peer descubierto
+                Bootstrap(peer.IPAddress.ToString(), peer.Port, peer.PublicKey);
+
+                // Opcional: agregar como amigo automáticamente
+                // AddFriend(peer.PublicKey, "Discovered on LAN");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.WarningF($"[{LOG_TAG}] Error manejando peer descubierto: {ex.Message}");
             }
         }
 
@@ -398,5 +433,7 @@ namespace ToxCore.Core
         public bool ProxyEnabled { get; set; } = false;
         public string ProxyHost { get; set; } = string.Empty;
         public ushort ProxyPort { get; set; } = 0;
+        public bool EnableLANDiscovery { get; set; } = true;
+
     }
 }
