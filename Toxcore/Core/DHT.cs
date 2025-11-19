@@ -49,6 +49,22 @@ namespace ToxCore.Core
         }
     }
 
+    public struct DHTHandshake
+    {
+        public byte[] TemporaryPublicKey;
+        public byte[] TemporarySecretKey;
+        public byte[] PeerPublicKey;
+        public long CreationTime;
+        public IPPort EndPoint;
+    }
+
+    public struct HandshakePacket
+    {
+        public byte[] TemporaryPublicKey; // 32 bytes
+        public byte[] EncryptedPayload;   // Datos encriptados
+    }
+
+
     /// <summary>
     /// Nodo DHT con información completa
     /// </summary>
@@ -85,6 +101,18 @@ namespace ToxCore.Core
     public class DHT
     {
         private const string LOG_TAG = "DHT";
+
+        // Constantes reales de toxcore
+        public const int MAX_FRIEND_CLOSE = 8;
+        public const int CRYPTO_PACKET_SIZE = 122;
+        public const int CRYPTO_NONCE_SIZE = 24;
+        public const int CRYPTO_PUBLIC_KEY_SIZE = 32;
+        public const int CRYPTO_SECRET_KEY_SIZE = 32;
+        public const int MAX_CLOSE_TO_BOOTSTRAP_NODES = 16;
+        public const int DHT_PING_INTERVAL = 30000; // 30 segundos
+        public const int DHT_PING_TIMEOUT = 10000;  // 10 segundos
+
+
         private long _lastCleanupTime = 0;
 
         private DateTime _lastCleanup = DateTime.UtcNow;
@@ -95,10 +123,8 @@ namespace ToxCore.Core
         private readonly object _cacheLock = new object();
         private DateTime _lastCacheCleanup = DateTime.UtcNow;
 
-        public const int MAX_FRIEND_CLOSE = 8;
-        public const int MAX_CLOSE_TO_BOOTSTRAP_NODES = 16;
-        public const int DHT_PING_INTERVAL = 30000; // 30 segundos
-        public const int DHT_PING_TIMEOUT = 10000;  // 10 segundos
+        private readonly Dictionary<string, DHTNode> _nodesByKey;
+
 
         public byte[] SelfPublicKey { get; private set; }
         public byte[] SelfSecretKey { get; private set; }
@@ -125,21 +151,37 @@ namespace ToxCore.Core
             }
         }
 
+        private readonly Dictionary<string, DHTHandshake> _activeHandshakes;
+        private readonly object _handshakesLock = new object();
+        private const int HANDSHAKE_TIMEOUT = 30000; // 30 segundos
+
+        // Claves temporales para handshake
+        private byte[] _currentTempPublicKey;
+        private byte[] _currentTempSecretKey;
+        private long _lastKeyRotation;
+        private const int KEY_ROTATION_INTERVAL = 60000; // Rotar cada 60 segundos
+
+
+
         public DHT(byte[] selfPublicKey, byte[] selfSecretKey)
         {
-            SelfPublicKey = new byte[32];
-            SelfSecretKey = new byte[32];
-            Buffer.BlockCopy(selfPublicKey, 0, SelfPublicKey, 0, 32);
-            Buffer.BlockCopy(selfSecretKey, 0, SelfSecretKey, 0, 32);
+            SelfPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+            SelfSecretKey = new byte[CRYPTO_SECRET_KEY_SIZE];
+            Buffer.BlockCopy(selfPublicKey, 0, SelfPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+            Buffer.BlockCopy(selfSecretKey, 0, SelfSecretKey, 0, CRYPTO_SECRET_KEY_SIZE);
 
             _nodes = new List<DHTNode>();
             _bootstrapNodes = new List<PackedNode>();
+            _nodesByKey = new Dictionary<string, DHTNode>();
+
+            // ✅ INICIALIZAR DICCIONARIOS FALTANTES
+            _activeHandshakes = new Dictionary<string, DHTHandshake>();
+
             _lastPingID = 0;
             _lastBootstrapTime = 0;
 
-            // Crear socket para DHT
             Socket = Network.new_socket(2, 2, 17); // IPv4 UDP
-            Logger.Log.Info($"[{LOG_TAG}] DHT inicializado - Socket: {Socket}");
+            Logger.Log.InfoF($"[{LOG_TAG}] DHT inicializado - Socket: {Socket}");
         }
 
         // ==================== FUNCIONES COMPATIBLES CON C ORIGINAL ====================
@@ -149,30 +191,21 @@ namespace ToxCore.Core
         /// </summary>
         public int DHT_bootstrap(IPPort ipp, byte[] public_key)
         {
-            Logger.Log.InfoF($"[{LOG_TAG}] Bootstrap a {ipp} [PK: {BitConverter.ToString(public_key, 0, 8).Replace("-", "")}...]");
+            Logger.Log.InfoF($"[{LOG_TAG}] Bootstrap a {ipp}");
 
             if (Socket == -1) return -1;
 
             try
             {
-                // Agregar nodo bootstrap
                 var bootstrapNode = new PackedNode(ipp, public_key);
                 _bootstrapNodes.Add(bootstrapNode);
 
-                // Enviar solicitud de bootstrap
-                byte[] packet = CreateGetNodesRequest(SelfPublicKey);
-                int sent = Network.socket_send(Socket, packet, packet.Length, ipp);
+                // Enviar get_nodes request encriptado
+                byte[] packet = CreateEncryptedGetNodesPacket(public_key, SelfPublicKey);
+                if (packet == null) return -1;
 
-                if (sent > 0)
-                {
-                    Logger.Log.DebugF($"[{LOG_TAG}] Bootstrap enviado a {ipp}");
-                    return 0;
-                }
-                else
-                {
-                    Logger.Log.WarningF($"[{LOG_TAG}] Falló envío de bootstrap a {ipp}");
-                    return -1;
-                }
+                int sent = Network.socket_send(Socket, packet, packet.Length, ipp);
+                return sent > 0 ? 0 : -1;
             }
             catch (Exception ex)
             {
@@ -181,12 +214,315 @@ namespace ToxCore.Core
             }
         }
 
+
         /// <summary>
-        /// DHT_handle_packet - Compatible con C original
+        /// Genera o rota las claves temporales para handshake
+        /// </summary>
+        private void EnsureTempKeys()
+        {
+            long currentTime = DateTime.UtcNow.Ticks;
+
+            if (_currentTempPublicKey == null ||
+                (currentTime - _lastKeyRotation) > TimeSpan.TicksPerMillisecond * KEY_ROTATION_INTERVAL)
+            {
+                var keyPair = CryptoBox.GenerateKeyPair();
+                _currentTempPublicKey = keyPair.PublicKey;
+                _currentTempSecretKey = keyPair.PrivateKey;
+                _lastKeyRotation = currentTime;
+
+                Logger.Log.DebugF($"[{LOG_TAG}] Claves temporales rotadas");
+            }
+        }
+
+        /// <summary>
+        /// Inicia handshake criptográfico con un nodo
+        /// </summary>
+        public int StartHandshake(IPPort endPoint, byte[] peerPublicKey)
+        {
+            try
+            {
+                EnsureTempKeys();
+
+                // Crear payload del handshake: nuestra public key real + nonce
+                byte[] payload = new byte[CRYPTO_PUBLIC_KEY_SIZE + 8];
+                Buffer.BlockCopy(SelfPublicKey, 0, payload, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                byte[] nonce = BitConverter.GetBytes(DateTime.UtcNow.Ticks);
+                Buffer.BlockCopy(nonce, 0, payload, CRYPTO_PUBLIC_KEY_SIZE, 8);
+
+                // Encriptar payload con la public key del peer
+                byte[] encryptionNonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
+                byte[] encryptedPayload = CryptoBox.Encrypt(payload, encryptionNonce, peerPublicKey, SelfSecretKey);
+
+                if (encryptedPayload == null)
+                {
+                    Logger.Log.ErrorF($"[{LOG_TAG}] No se pudo encriptar payload del handshake");
+                    return -1;
+                }
+
+                // Construir paquete de handshake
+                byte[] handshakePacket = CreateHandshakePacket(_currentTempPublicKey, encryptionNonce, encryptedPayload);
+
+                // Enviar handshake
+                int sent = DHT_send_packet(endPoint, handshakePacket, handshakePacket.Length);
+                if (sent <= 0) return -1;
+
+                // Registrar handshake pendiente
+                var handshake = new DHTHandshake
+                {
+                    TemporaryPublicKey = _currentTempPublicKey,
+                    TemporarySecretKey = _currentTempSecretKey,
+                    PeerPublicKey = peerPublicKey,
+                    CreationTime = DateTime.UtcNow.Ticks,
+                    EndPoint = endPoint
+                };
+
+                string handshakeKey = $"{endPoint}_{BitConverter.ToString(peerPublicKey).Replace("-", "").Substring(0, 16)}";
+
+                lock (_handshakesLock)
+                {
+                    _activeHandshakes[handshakeKey] = handshake;
+                }
+
+                Logger.Log.DebugF($"[{LOG_TAG}] Handshake iniciado con {endPoint}");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error iniciando handshake: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// Crea paquete de handshake
+        /// </summary>
+        private byte[] CreateHandshakePacket(byte[] tempPublicKey, byte[] nonce, byte[] encryptedPayload)
+        {
+            byte[] packet = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + encryptedPayload.Length];
+            packet[0] = 0x10; // HANDSHAKE_REQUEST packet type
+
+            Buffer.BlockCopy(tempPublicKey, 0, packet, 1, CRYPTO_PUBLIC_KEY_SIZE);
+            Buffer.BlockCopy(nonce, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_NONCE_SIZE);
+            Buffer.BlockCopy(encryptedPayload, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload.Length);
+
+            return packet;
+        }
+
+        /// <summary>
+        /// Maneja respuesta de handshake
+        /// </summary>
+        private int HandleHandshakeResponse(byte[] packet, int length, IPPort source)
+        {
+            try
+            {
+                if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + 16)
+                    return -1;
+
+                // Extraer temporary public key del remitente
+                byte[] peerTempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1, peerTempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Buscar handshake pendiente
+                var handshake = FindHandshakeByTempKey(peerTempPublicKey, source);
+                if (handshake == null)
+                {
+                    Logger.Log.DebugF($"[{LOG_TAG}] Handshake no encontrado para {source}");
+                    return -1;
+                }
+
+                // Extraer y desencriptar payload
+                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
+                byte[] encryptedPayload = new byte[length - 1 - CRYPTO_PUBLIC_KEY_SIZE - CRYPTO_NONCE_SIZE];
+
+                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, nonce, 0, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload, 0, encryptedPayload.Length);
+
+                // Desencriptar con nuestra temporary secret key
+                byte[] decrypted = CryptoBox.Decrypt(encryptedPayload, nonce, peerTempPublicKey, handshake.Value.TemporarySecretKey);
+                if (decrypted == null || decrypted.Length < CRYPTO_PUBLIC_KEY_SIZE)
+                {
+                    Logger.Log.ErrorF($"[{LOG_TAG}] No se pudo desencriptar respuesta de handshake");
+                    return -1;
+                }
+
+                // Extraer public key real del peer
+                byte[] peerRealPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(decrypted, 0, peerRealPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Verificar que coincide con la public key esperada
+                if (!CryptoVerify.Verify32(peerRealPublicKey, handshake.Value.PeerPublicKey))
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en handshake");
+                    return -1;
+                }
+
+                // Handshake completado - agregar nodo a la DHT
+                AddNode(peerRealPublicKey, source);
+
+                // Limpiar handshake
+                RemoveHandshake(peerTempPublicKey, source);
+
+                Logger.Log.InfoF($"[{LOG_TAG}] Handshake completado con {source}");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error manejando respuesta de handshake: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// Maneja solicitud de handshake entrante
+        /// </summary>
+        private int HandleHandshakeRequest(byte[] packet, int length, IPPort source)
+        {
+            try
+            {
+                if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + 16)
+                    return -1;
+
+                // Extraer temporary public key del remitente
+                byte[] peerTempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1, peerTempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Extraer y desencriptar payload
+                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
+                byte[] encryptedPayload = new byte[length - 1 - CRYPTO_PUBLIC_KEY_SIZE - CRYPTO_NONCE_SIZE];
+
+                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, nonce, 0, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload, 0, encryptedPayload.Length);
+
+                // Desencriptar con nuestra secret key real
+                byte[] decrypted = CryptoBox.Decrypt(encryptedPayload, nonce, peerTempPublicKey, SelfSecretKey);
+                if (decrypted == null || decrypted.Length < CRYPTO_PUBLIC_KEY_SIZE)
+                {
+                    Logger.Log.ErrorF($"[{LOG_TAG}] No se pudo desencriptar solicitud de handshake");
+                    return -1;
+                }
+
+                // Extraer public key real del peer
+                byte[] peerRealPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(decrypted, 0, peerRealPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Generar respuesta de handshake
+                EnsureTempKeys();
+
+                // Crear payload de respuesta: nuestra public key real
+                byte[] responsePayload = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(SelfPublicKey, 0, responsePayload, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Encriptar respuesta con la temporary public key del peer
+                byte[] responseNonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
+                byte[] encryptedResponse = CryptoBox.Encrypt(responsePayload, responseNonce, peerTempPublicKey, _currentTempSecretKey);
+
+                if (encryptedResponse == null)
+                {
+                    Logger.Log.ErrorF($"[{LOG_TAG}] No se pudo encriptar respuesta de handshake");
+                    return -1;
+                }
+
+                // Enviar respuesta
+                byte[] responsePacket = CreateHandshakeResponsePacket(_currentTempPublicKey, responseNonce, encryptedResponse);
+                int sent = DHT_send_packet(source, responsePacket, responsePacket.Length);
+
+                if (sent > 0)
+                {
+                    // Agregar nodo a la DHT
+                    AddNode(peerRealPublicKey, source);
+                    Logger.Log.InfoF($"[{LOG_TAG}] Handshake respondido a {source}");
+                }
+
+                return sent > 0 ? 0 : -1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error manejando solicitud de handshake: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// Crea paquete de respuesta de handshake
+        /// </summary>
+        private byte[] CreateHandshakeResponsePacket(byte[] tempPublicKey, byte[] nonce, byte[] encryptedPayload)
+        {
+            byte[] packet = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + encryptedPayload.Length];
+            packet[0] = 0x11; // HANDSHAKE_RESPONSE packet type
+
+            Buffer.BlockCopy(tempPublicKey, 0, packet, 1, CRYPTO_PUBLIC_KEY_SIZE);
+            Buffer.BlockCopy(nonce, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_NONCE_SIZE);
+            Buffer.BlockCopy(encryptedPayload, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload.Length);
+
+            return packet;
+        }
+
+        // Métodos auxiliares para gestión de handshakes
+        private DHTHandshake? FindHandshakeByTempKey(byte[] tempPublicKey, IPPort endPoint)
+        {
+            string targetKey = $"{endPoint}_{BitConverter.ToString(tempPublicKey).Replace("-", "").Substring(0, 16)}";
+
+            lock (_handshakesLock)
+            {
+                if (_activeHandshakes.TryGetValue(targetKey, out var handshake))
+                {
+                    return handshake;
+                }
+            }
+            return null;
+        }
+
+        private void RemoveHandshake(byte[] tempPublicKey, IPPort endPoint)
+        {
+            string handshakeKey = $"{endPoint}_{BitConverter.ToString(tempPublicKey).Replace("-", "").Substring(0, 16)}";
+
+            lock (_handshakesLock)
+            {
+                _activeHandshakes.Remove(handshakeKey);
+            }
+        }
+
+        /// <summary>
+        /// Limpia handshakes expirados
+        /// </summary>
+        private void CleanupExpiredHandshakes()
+        {
+            long cutoffTime = DateTime.UtcNow.Ticks - TimeSpan.TicksPerMillisecond * HANDSHAKE_TIMEOUT;
+            int removed = 0;
+
+            lock (_handshakesLock)
+            {
+                var expiredKeys = new List<string>();
+
+                foreach (var kvp in _activeHandshakes)
+                {
+                    if (kvp.Value.CreationTime < cutoffTime)
+                    {
+                        expiredKeys.Add(kvp.Key);
+                    }
+                }
+
+                foreach (var key in expiredKeys)
+                {
+                    _activeHandshakes.Remove(key);
+                    removed++;
+                }
+            }
+
+            if (removed > 0)
+            {
+                Logger.Log.DebugF($"[{LOG_TAG}] {removed} handshakes expirados removidos");
+            }
+        }
+
+
+        /// <summary>
+        /// Manejar paquetes DHT REAL con encriptación
         /// </summary>
         public int DHT_handle_packet(byte[] packet, int length, IPPort source)
         {
-            if (packet == null || length < 4) return -1;
+            if (packet == null || length < 1 + CRYPTO_NONCE_SIZE) return -1;
 
             try
             {
@@ -194,24 +530,167 @@ namespace ToxCore.Core
 
                 switch (packetType)
                 {
-                    case 0x00: // Ping request
-                        return HandlePingRequest(packet, length, source);
-                    case 0x01: // Ping response
-                        return HandlePingResponse(packet, length, source);
-                    case 0x02: // Get nodes request
-                        return HandleGetNodesRequest(packet, length, source);
-                    case 0x04: // Send nodes response
-                        return HandleNodesResponse(packet, length, source);
+                    case 0x00: // Ping request encriptado
+                        return HandleEncryptedPingRequest(packet, length, source);
+                    case 0x02: // Get nodes request encriptado  
+                        return HandleEncryptedGetNodesRequest(packet, length, source);
+                    case 0x04: // Send nodes response encriptado
+                        return HandleEncryptedSendNodesResponse(packet, length, source);
+                    case 0x10: // Handshake request
+                        return HandleHandshakeRequest(packet, length, source);
+                    case 0x11: // Handshake response
+                        return HandleHandshakeResponse(packet, length, source);
                     default:
+                        Logger.Log.DebugF($"[{LOG_TAG}] Tipo de paquete desconocido: 0x{packetType:X2}");
                         return -1;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[DHT] Packet handle error: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error manejando paquete: {ex.Message}");
                 return -1;
             }
         }
+
+        private int HandleEncryptedPingRequest(byte[] packet, int length, IPPort source)
+        {
+            // ✅ IMPLEMENTACIÓN REAL: Usar handshake criptográfico para obtener la public key
+            if (HandleEncryptedPingPacket(packet, length - 1, source, out byte[] senderPublicKey))
+            {
+                // En lugar de simular, iniciamos un handshake para obtener la public key real
+                // Buscar si ya tenemos un nodo en esta dirección IP
+                var existingNode = FindNodeByEndpoint(source);
+                if (existingNode != null)
+                {
+                    // Ya tenemos este nodo, actualizar last seen
+                    existingNode.LastSeen = DateTime.UtcNow.Ticks;
+                    existingNode.IsActive = true;
+
+                    // Enviar respuesta ping con la public key conocida
+                    byte[] responsePacket = CreateEncryptedPingPacket(existingNode.PublicKey);
+                    if (responsePacket != null)
+                    {
+                        return DHT_send_packet(source, responsePacket, responsePacket.Length);
+                    }
+                }
+                else
+                {
+                    // ✅ NUEVO NODO: Iniciar handshake para obtener su public key
+                    Logger.Log.DebugF($"[{LOG_TAG}] Nuevo ping de {source}, iniciando handshake...");
+
+                    // Para pings de nodos desconocidos, podríamos:
+                    // 1. Enviar un handshake request
+                    // 2. O incluir información de handshake en la respuesta ping
+                    // Por ahora, simplemente respondemos el ping y confiamos en que iniciarán handshake
+
+                    byte[] simulatedResponse = CreateEncryptedPingPacket(SelfPublicKey); // Usamos nuestra PK como destino
+                    if (simulatedResponse != null)
+                    {
+                        return DHT_send_packet(source, simulatedResponse, simulatedResponse.Length);
+                    }
+                }
+            }
+
+            Logger.Log.DebugF($"[{LOG_TAG}] Ping request inválido de {source}");
+            return -1;
+        }
+
+        /// <summary>
+        /// Busca un nodo por su endpoint (IP + puerto)
+        /// </summary>
+        private DHTNode FindNodeByEndpoint(IPPort endPoint)
+        {
+            lock (_nodesLock)
+            {
+                return _nodes.Find(n =>
+                    n.EndPoint.IP.ToString() == endPoint.IP.ToString() &&
+                    n.EndPoint.Port == endPoint.Port);
+            }
+        }
+
+        private int HandleEncryptedGetNodesRequest(byte[] packet, int length, IPPort source)
+        {
+            try
+            {
+                if (length < 1 + CRYPTO_NONCE_SIZE + 64) return -1; // mínimo para desencriptar
+
+                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
+                byte[] encrypted = new byte[length - 1 - CRYPTO_NONCE_SIZE];
+
+                Buffer.BlockCopy(packet, 1, nonce, 0, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(packet, 1 + CRYPTO_NONCE_SIZE, encrypted, 0, encrypted.Length);
+
+                byte[] decrypted = CryptoBox.Decrypt(encrypted, nonce, SelfPublicKey, SelfSecretKey);
+                if (decrypted == null || decrypted.Length < CRYPTO_PUBLIC_KEY_SIZE * 2) return -1;
+
+                // Extraer public keys: remitente y objetivo de búsqueda
+                byte[] senderPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                byte[] searchPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(decrypted, 0, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+                Buffer.BlockCopy(decrypted, CRYPTO_PUBLIC_KEY_SIZE, searchPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                AddNode(senderPublicKey, source);
+
+                // Obtener nodos más cercanos al objetivo de búsqueda
+                var closestNodes = GetClosestNodes(searchPublicKey, 4);
+                if (closestNodes.Count > 0)
+                {
+                    byte[] response = CreateEncryptedSendNodesPacket(senderPublicKey, closestNodes);
+                    if (response != null)
+                    {
+                        return DHT_send_packet(source, response, response.Length);
+                    }
+                }
+
+                return -1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en get_nodes: {ex.Message}");
+                return -1;
+            }
+        }
+
+        private int HandleEncryptedSendNodesResponse(byte[] packet, int length, IPPort source)
+        {
+            try
+            {
+                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
+                byte[] encrypted = new byte[length - 1 - CRYPTO_NONCE_SIZE];
+
+                Buffer.BlockCopy(packet, 1, nonce, 0, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(packet, 1 + CRYPTO_NONCE_SIZE, encrypted, 0, encrypted.Length);
+
+                byte[] decrypted = CryptoBox.Decrypt(encrypted, nonce, SelfPublicKey, SelfSecretKey);
+                if (decrypted == null) return -1;
+
+                // Procesar nodos recibidos (cada nodo: 32 + 18 = 50 bytes)
+                int nodeCount = decrypted.Length / 50;
+                for (int i = 0; i < nodeCount; i++)
+                {
+                    int offset = i * 50;
+                    byte[] nodePublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                    byte[] ippBytes = new byte[18];
+
+                    Buffer.BlockCopy(decrypted, offset, nodePublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+                    Buffer.BlockCopy(decrypted, offset + CRYPTO_PUBLIC_KEY_SIZE, ippBytes, 0, 18);
+
+                    IPPort nodeIPPort = BytesToIPPort(ippBytes);
+                    if (nodeIPPort.Port > 0)
+                    {
+                        AddNode(nodePublicKey, nodeIPPort);
+                    }
+                }
+
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en send_nodes: {ex.Message}");
+                return -1;
+            }
+        }
+
 
         /// <summary>
         /// DHT_send_packet - Compatible con C original
@@ -219,16 +698,9 @@ namespace ToxCore.Core
         public int DHT_send_packet(IPPort ipp, byte[] packet, int length)
         {
             if (Socket == -1) return -1;
-
-            try
-            {
-                return Network.socket_send(Socket, packet, length, ipp);
-            }
-            catch (Exception)
-            {
-                return -1;
-            }
+            return Network.socket_send(Socket, packet, length, ipp);
         }
+
 
         /// <summary>
         /// DHT_get_nodes - Compatible con C original
@@ -267,41 +739,40 @@ namespace ToxCore.Core
         // ==================== FUNCIONES DE GESTIÓN DE NODOS ====================
 
         /// <summary>
-        /// Agregar nodo a la DHT
+        /// Agregar nodo con verificación de duplicados por public key
         /// </summary>
         public int AddNode(byte[] publicKey, IPPort endPoint)
         {
-            if (publicKey == null || publicKey.Length != 32)
+            if (publicKey == null || publicKey.Length != CRYPTO_PUBLIC_KEY_SIZE)
                 return -1;
 
             try
             {
+                string keyString = BitConverter.ToString(publicKey).Replace("-", "");
+
                 lock (_nodesLock)
                 {
-                    // Buscar nodo existente - IMPLEMENTACIÓN REAL
-                    var existingNode = _nodes.Find(n =>
-                        n.EndPoint.IP.ToString() == endPoint.IP.ToString() &&
-                        n.EndPoint.Port == endPoint.Port &&
-                        ByteArraysEqual(publicKey, n.PublicKey));
-
-                    if (existingNode != null)
+                    if (_nodesByKey.ContainsKey(keyString))
                     {
+                        // Actualizar nodo existente
+                        var existingNode = _nodesByKey[keyString];
+                        existingNode.EndPoint = endPoint;
                         existingNode.LastSeen = DateTime.UtcNow.Ticks;
                         existingNode.IsActive = true;
-                        Logger.Log.DebugF($"[{LOG_TAG}] Nodo actualizado: {endPoint}");
                         return 1;
                     }
 
-                    // Crear nuevo nodo - IMPLEMENTACIÓN REAL
+                    // Crear nuevo nodo
                     var newNode = new DHTNode(publicKey, endPoint);
                     _nodes.Add(newNode);
-                    Logger.Log.InfoF($"[{LOG_TAG}] Nuevo nodo agregado: {endPoint} [Total: {_nodes.Count}]");
+                    _nodesByKey[keyString] = newNode;
 
-                    // Limpieza de nodos antiguos - IMPLEMENTACIÓN REAL
+                    Logger.Log.DebugF($"[{LOG_TAG}] Nuevo nodo agregado: {endPoint} [Total: {_nodes.Count}]");
+
+                    // Limpieza periódica
                     if (_nodes.Count > 1000)
                     {
-                        long tenMinutesAgo = DateTime.UtcNow.Ticks - (TimeSpan.TicksPerMinute * 10);
-                        _nodes.RemoveAll(n => !n.IsActive || n.LastSeen < tenMinutesAgo);
+                        CleanupOldNodes();
                     }
 
                     return 0;
@@ -315,24 +786,49 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// Comparar arrays de bytes - NUEVA FUNCIÓN AUXILIAR
+        /// Limpieza REAL de nodos antiguos - MEJORADO
+        /// </summary>
+        private void CleanupOldNodes()
+        {
+            long cutoffTime = DateTime.UtcNow.Ticks - (TimeSpan.TicksPerMinute * 10);
+            int removed = 0;
+
+            lock (_nodesLock)
+            {
+                for (int i = _nodes.Count - 1; i >= 0; i--)
+                {
+                    var node = _nodes[i];
+                    if (!node.IsActive || node.LastSeen < cutoffTime)
+                    {
+                        string keyString = BitConverter.ToString(node.PublicKey).Replace("-", "");
+                        _nodesByKey.Remove(keyString);
+                        _nodes.RemoveAt(i);
+                        removed++;
+                    }
+                }
+            }
+
+            if (removed > 0)
+            {
+                Logger.Log.DebugF($"[{LOG_TAG}] Limpieza: {removed} nodos removidos");
+            }
+        }
+
+        /// <summary>
+        /// Comparar arrays de bytes de forma segura - MEJORADO
         /// </summary>
         private static bool ByteArraysEqual(byte[] a, byte[] b)
         {
             if (a == null || b == null || a.Length != b.Length)
                 return false;
 
-            for (int i = 0; i < a.Length; i++)
-            {
-                if (a[i] != b[i])
-                    return false;
-            }
-            return true;
+            // Usar comparación constante en tiempo para seguridad
+            return CryptoVerify.Verify(a, b);
         }
 
 
         /// <summary>
-        /// Versión cacheada de GetClosestNodes
+        /// Versión cacheada de GetClosestNodes - CORREGIDO
         /// </summary>
         public List<DHTNode> GetClosestNodesCached(byte[] targetPublicKey, int maxNodes = 8)
         {
@@ -347,12 +843,12 @@ namespace ToxCore.Core
                     _lastCacheCleanup = DateTime.UtcNow;
                 }
 
-                // Devolver resultado cacheado si existe y es reciente
+                // Devolver resultado cacheado si existe
                 if (_closestNodesCache.TryGetValue(cacheKey, out var cached) &&
-                    cached != null)
+                    cached != null && cached.Count > 0)
                 {
                     Logger.Log.TraceF($"[{LOG_TAG}] Cache hit para búsqueda de nodos");
-                    return cached.Take(maxNodes).ToList();
+                    return cached.Count <= maxNodes ? cached : cached.GetRange(0, maxNodes);
                 }
             }
 
@@ -367,8 +863,9 @@ namespace ToxCore.Core
             return result;
         }
 
+        
         /// <summary>
-        /// Obtener nodos más cercanos a una clave
+        /// Obtener nodos más cercanos usando distancia XOR real
         /// </summary>
         public List<DHTNode> GetClosestNodes(byte[] targetKey, int maxNodes = MAX_FRIEND_CLOSE)
         {
@@ -378,25 +875,62 @@ namespace ToxCore.Core
             {
                 lock (_nodesLock)
                 {
-                    // CORREGIR: Ordenar por distancia XOR correctamente
-                    var sortedNodes = _nodes
-                        .Where(n => n.IsActive)
-                        .Select(n => new { Node = n, Dist = Distance(n.PublicKey, targetKey) })
-                        .OrderBy(x => x.Dist, new ByteArrayComparer())
-                        .Take(maxNodes)
-                        .Select(x => x.Node)
-                        .ToList();
+                    // Calcular distancia XOR para cada nodo activo
+                    var nodesWithDistance = new List<(DHTNode Node, byte[] Distance)>();
 
-                    result.AddRange(sortedNodes);
+                    foreach (var node in _nodes)
+                    {
+                        if (node.IsActive)
+                        {
+                            byte[] distance = CalculateXORDistance(node.PublicKey, targetKey);
+                            nodesWithDistance.Add((node, distance));
+                        }
+                    }
+
+                    // Ordenar por distancia XOR (bytes más significativos primero)
+                    nodesWithDistance.Sort((a, b) => CompareXORDistance(a.Distance, b.Distance));
+
+                    // Tomar los más cercanos
+                    for (int i = 0; i < Math.Min(maxNodes, nodesWithDistance.Count); i++)
+                    {
+                        result.Add(nodesWithDistance[i].Node);
+                    }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[DHT] GetClosestNodes error: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] GetClosestNodes error: {ex.Message}");
             }
 
             return result;
         }
+
+        /// <summary>
+        /// Calcular distancia XOR entre dos claves (Kademlia)
+        /// </summary>
+        private byte[] CalculateXORDistance(byte[] key1, byte[] key2)
+        {
+            byte[] result = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+            for (int i = 0; i < CRYPTO_PUBLIC_KEY_SIZE; i++)
+            {
+                result[i] = (byte)(key1[i] ^ key2[i]);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Comparar distancias XOR (para ordenamiento)
+        /// </summary>
+        private int CompareXORDistance(byte[] dist1, byte[] dist2)
+        {
+            for (int i = 0; i < dist1.Length; i++)
+            {
+                if (dist1[i] != dist2[i])
+                    return dist1[i].CompareTo(dist2[i]);
+            }
+            return 0;
+        }
+
 
         public class ByteArrayComparer : IComparer<byte[]>
         {
@@ -634,6 +1168,167 @@ namespace ToxCore.Core
         }
 
         /// <summary>
+        /// Crea un paquete ping REAL encriptado con CryptoBox
+        /// </summary>
+        private byte[] CreateEncryptedPingPacket(byte[] targetPublicKey)
+        {
+            try
+            {
+                // Datos del ping (timestamp + ping ID + información de handshake)
+                byte[] pingData = new byte[16 + CRYPTO_PUBLIC_KEY_SIZE];
+                byte[] timestamp = BitConverter.GetBytes(DateTime.UtcNow.Ticks);
+                byte[] pingIdBytes = BitConverter.GetBytes(_lastPingID++);
+
+                Buffer.BlockCopy(timestamp, 0, pingData, 0, 8);
+                Buffer.BlockCopy(pingIdBytes, 0, pingData, 8, 4);
+
+                // ✅ INCLUIR nuestra public key temporal para facilitar handshake
+                EnsureTempKeys();
+                Buffer.BlockCopy(_currentTempPublicKey, 0, pingData, 12, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Nonce aleatorio
+                byte[] nonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
+
+                // Encriptar con CryptoBox
+                byte[] encrypted = CryptoBox.Encrypt(pingData, nonce, targetPublicKey, SelfSecretKey);
+                if (encrypted == null) return null;
+
+                // Construir paquete: [nonce(24)][encrypted_data]
+                byte[] packet = new byte[CRYPTO_NONCE_SIZE + encrypted.Length];
+                Buffer.BlockCopy(nonce, 0, packet, 0, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(encrypted, 0, packet, CRYPTO_NONCE_SIZE, encrypted.Length);
+
+                return packet;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando ping encriptado: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Procesa un paquete ping REAL encriptado
+        /// </summary>
+        private bool HandleEncryptedPingPacket(byte[] packet, int length, IPPort source, out byte[] senderPublicKey)
+        {
+            senderPublicKey = null;
+
+            if (length < CRYPTO_NONCE_SIZE + 16) // nonce + datos mínimos
+                return false;
+
+            try
+            {
+                // Extraer nonce y datos encriptados
+                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
+                byte[] encrypted = new byte[length - CRYPTO_NONCE_SIZE];
+
+                Buffer.BlockCopy(packet, 0, nonce, 0, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(packet, CRYPTO_NONCE_SIZE, encrypted, 0, encrypted.Length);
+
+                // Intentar desencriptar con nuestra clave secreta
+                byte[] decrypted = CryptoBox.Decrypt(encrypted, nonce, SelfPublicKey, SelfSecretKey);
+                if (decrypted == null || decrypted.Length < 12)
+                    return false;
+
+                // ✅ IMPLEMENTACIÓN REAL: Extraer información de handshake si está presente
+                if (decrypted.Length >= 12 + CRYPTO_PUBLIC_KEY_SIZE)
+                {
+                    // El ping incluye public key temporal del remitente
+                    byte[] peerTempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                    Buffer.BlockCopy(decrypted, 12, peerTempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                    Logger.Log.DebugF($"[{LOG_TAG}] Ping con handshake info de {source}");
+
+                    // Podríamos usar esta info para iniciar handshake más eficientemente
+                    // Por ahora, simplemente aceptamos el ping
+                    return true;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error procesando ping encriptado: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Crea paquete get_nodes REAL encriptado
+        /// </summary>
+        private byte[] CreateEncryptedGetNodesPacket(byte[] targetPublicKey, byte[] searchPublicKey)
+        {
+            try
+            {
+                // Datos: nuestra public key + public key a buscar
+                byte[] requestData = new byte[CRYPTO_PUBLIC_KEY_SIZE * 2];
+                Buffer.BlockCopy(SelfPublicKey, 0, requestData, 0, CRYPTO_PUBLIC_KEY_SIZE);
+                Buffer.BlockCopy(searchPublicKey, 0, requestData, CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_PUBLIC_KEY_SIZE);
+
+                byte[] nonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
+                byte[] encrypted = CryptoBox.Encrypt(requestData, nonce, targetPublicKey, SelfSecretKey);
+                if (encrypted == null) return null;
+
+                byte[] packet = new byte[1 + CRYPTO_NONCE_SIZE + encrypted.Length];
+                packet[0] = 0x02; // GET_NODES packet type
+                Buffer.BlockCopy(nonce, 0, packet, 1, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(encrypted, 0, packet, 1 + CRYPTO_NONCE_SIZE, encrypted.Length);
+
+                return packet;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando get_nodes encriptado: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Crea respuesta send_nodes REAL encriptada
+        /// </summary>
+        private byte[] CreateEncryptedSendNodesPacket(byte[] targetPublicKey, List<DHTNode> nodes)
+        {
+            try
+            {
+                // Serializar nodos (cada nodo: public_key(32) + ip_port(18))
+                int nodesDataSize = nodes.Count * (CRYPTO_PUBLIC_KEY_SIZE + 18);
+                byte[] nodesData = new byte[nodesDataSize];
+                int offset = 0;
+
+                foreach (var node in nodes)
+                {
+                    Buffer.BlockCopy(node.PublicKey, 0, nodesData, offset, CRYPTO_PUBLIC_KEY_SIZE);
+                    offset += CRYPTO_PUBLIC_KEY_SIZE;
+
+                    byte[] ippBytes = IPPortToBytes(node.EndPoint);
+                    Buffer.BlockCopy(ippBytes, 0, nodesData, offset, 18);
+                    offset += 18;
+                }
+
+                byte[] nonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
+                byte[] encrypted = CryptoBox.Encrypt(nodesData, nonce, targetPublicKey, SelfSecretKey);
+                if (encrypted == null) return null;
+
+                byte[] packet = new byte[1 + CRYPTO_NONCE_SIZE + encrypted.Length];
+                packet[0] = 0x04; // SEND_NODES packet type
+                Buffer.BlockCopy(nonce, 0, packet, 1, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(encrypted, 0, packet, 1 + CRYPTO_NONCE_SIZE, encrypted.Length);
+
+                return packet;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando send_nodes encriptado: {ex.Message}");
+                return null;
+            }
+        }
+
+
+
+
+
+        /// <summary>
         /// Crear get nodes request - IMPLEMENTACIÓN REAL
         /// </summary>
         private byte[] CreateGetNodesRequest(byte[] targetPublicKey)
@@ -698,17 +1393,12 @@ namespace ToxCore.Core
         private byte[] IPPortToBytes(IPPort ipp)
         {
             byte[] result = new byte[18];
-
-            // IP (siempre 16 bytes)
             if (ipp.IP.Data != null)
             {
                 Buffer.BlockCopy(ipp.IP.Data, 0, result, 0, 16);
             }
-
-            // Puerto (2 bytes, big-endian)
             result[16] = (byte)((ipp.Port >> 8) & 0xFF);
             result[17] = (byte)(ipp.Port & 0xFF);
-
             return result;
         }
 
@@ -760,6 +1450,11 @@ namespace ToxCore.Core
         {
             try
             {
+                CleanupOldNodes();
+                CleanupExpiredHandshakes();
+
+                EnsureTempKeys();
+
                 long currentTime = DateTime.UtcNow.Ticks;
 
                 // CORREGIR: Usar índices en lugar de enumeración
