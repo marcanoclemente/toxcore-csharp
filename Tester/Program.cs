@@ -74,11 +74,15 @@ namespace ToxCore
 
             // Test de Messenger.cs
             TestMessenger();
-            */
+            
+            
             TestToxIntegration();
             TestResilience();
             RunPerformanceBenchmark();
             TestNetworkComponents();
+            */
+
+            TestLANDiscovery();
 
 
             Console.WriteLine("\n✅ Todas las pruebas completadas.");
@@ -3375,71 +3379,167 @@ namespace ToxCore
         }
 
         private static void TestNetworkComponents()
-{
-    Logger.Log.Info("🌐 Probando componentes de red...");
+        {
+            Logger.Log.Info("🌐 Probando componentes de red...");
     
-    try
-    {
-        // 1. IPPort existe según tus pruebas
-        var ipPort = new IPPort();
-        Logger.Log.Info("✅ Estructura IPPort creada");
+            try
+            {
+                // 1. IPPort existe según tus pruebas
+                var ipPort = new IPPort();
+                Logger.Log.Info("✅ Estructura IPPort creada");
         
-        // 2. Probar CryptoHash - según tu código tienes:
-        // CryptoHash.Sha256(byte[] input) que devuelve byte[]
-        byte[] testData = new byte[32];
-        new Random().NextBytes(testData);
+                // 2. Probar CryptoHash - según tu código tienes:
+                // CryptoHash.Sha256(byte[] input) que devuelve byte[]
+                byte[] testData = new byte[32];
+                new Random().NextBytes(testData);
         
-        byte[] hash = CryptoHash.Sha256(testData); // Este overload existe
-        Logger.Log.Info($"✅ CryptoHash.Sha256 funcionando - Hash generado: {hash.Length} bytes");
+                byte[] hash = CryptoHash.Sha256(testData); // Este overload existe
+                Logger.Log.Info($"✅ CryptoHash.Sha256 funcionando - Hash generado: {hash.Length} bytes");
         
-        // 3. Probar RandomBytes - según tu código tienes:
-        // - RandomBytes.Generate(uint length)
-        // - RandomBytes.Generate(byte[] buffer)
-        byte[] randomData = RandomBytes.Generate(16); // Método real
-        Logger.Log.Info($"✅ RandomBytes.Generate funcionando - {randomData.Length} bytes aleatorios");
+                // 3. Probar RandomBytes - según tu código tienes:
+                // - RandomBytes.Generate(uint length)
+                // - RandomBytes.Generate(byte[] buffer)
+                byte[] randomData = RandomBytes.Generate(16); // Método real
+                Logger.Log.Info($"✅ RandomBytes.Generate funcionando - {randomData.Length} bytes aleatorios");
         
-        // También probar el otro overload
-        byte[] buffer = new byte[32];
-        RandomBytes.Generate(buffer);
-        Logger.Log.Info($"✅ RandomBytes.Generate(buffer) funcionando");
+                // También probar el otro overload
+                byte[] buffer = new byte[32];
+                RandomBytes.Generate(buffer);
+                Logger.Log.Info($"✅ RandomBytes.Generate(buffer) funcionando");
         
-        // 4. Probar Network - con parámetros exactos según tu código:
-        // new_socket(int domain, int type, int protocol)
-        // domain: 2 = IPv4, 10 = IPv6
-        // type: 2 = Dgram (UDP), 1 = Stream (TCP)  
-        // protocol: 17 = UDP, 6 = TCP
-        int socket = Network.new_socket(2, 2, 17); // IPv4, Dgram, UDP
-        Logger.Log.Info($"✅ Socket UDP IPv4 creado: {socket}");
+                // 4. Probar Network - con parámetros exactos según tu código:
+                // new_socket(int domain, int type, int protocol)
+                // domain: 2 = IPv4, 10 = IPv6
+                // type: 2 = Dgram (UDP), 1 = Stream (TCP)  
+                // protocol: 17 = UDP, 6 = TCP
+                int socket = Network.new_socket(2, 2, 17); // IPv4, Dgram, UDP
+                Logger.Log.Info($"✅ Socket UDP IPv4 creado: {socket}");
         
-        if (socket >= 0)
-        {
-            // Probar bind con dirección local
-            var localIP = new IP(new IP4("127.0.0.1"));
-            var localPort = new IPPort(localIP, 0); // Puerto 0 = asignado por sistema
-            int bindResult = Network.socket_bind(socket, localPort);
-            Logger.Log.Info($"✅ Socket bind: {bindResult == 0}");
+                if (socket >= 0)
+                {
+                    // Probar bind con dirección local
+                    var localIP = new IP(new IP4("127.0.0.1"));
+                    var localPort = new IPPort(localIP, 0); // Puerto 0 = asignado por sistema
+                    int bindResult = Network.socket_bind(socket, localPort);
+                    Logger.Log.Info($"✅ Socket bind: {bindResult == 0}");
             
-            Network.kill_socket(socket);
-            Logger.Log.Info("✅ Socket cerrado correctamente");
-        }
+                    Network.kill_socket(socket);
+                    Logger.Log.Info("✅ Socket cerrado correctamente");
+                }
         
-        // Probar también socket IPv6
-        int socket6 = Network.new_socket(10, 2, 17); // IPv6, Dgram, UDP
-        if (socket6 >= 0)
+                // Probar también socket IPv6
+                int socket6 = Network.new_socket(10, 2, 17); // IPv6, Dgram, UDP
+                if (socket6 >= 0)
+                {
+                    Logger.Log.Info($"✅ Socket UDP IPv6 creado: {socket6}");
+                    Network.kill_socket(socket6);
+                }
+        
+                Logger.Log.Info("🌐 Todos los componentes de red funcionando correctamente");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"❌ Error en componentes de red: {ex.Message}");
+            }
+        }
+
+        private static void TestLANDiscovery()
         {
-            Logger.Log.Info($"✅ Socket UDP IPv6 creado: {socket6}");
-            Network.kill_socket(socket6);
+            Logger.Log.Info("🔍 Probando LAN Discovery...");
+
+            try
+            {
+                // Generar clave pública de prueba
+                byte[] testPublicKey = new byte[32];
+                new Random().NextBytes(testPublicKey);
+
+                // Crear instancia de LAN Discovery
+                var lanDiscovery = new LANDiscovery(testPublicKey);
+
+                // Configurar callbacks
+                int peersDiscovered = 0;
+                int peersExpired = 0;
+
+                lanDiscovery.PeerDiscoveredCallback = (peer) =>
+                {
+                    peersDiscovered++;
+                    Logger.Log.Info($"✅ Peer descubierto: {peer}");
+                };
+
+                lanDiscovery.PeerExpiredCallback = (peer) =>
+                {
+                    peersExpired++;
+                    Logger.Log.Info($"🕒 Peer expirado: {peer}");
+                };
+
+                // Iniciar servicio
+                bool started = lanDiscovery.Start();
+                Logger.Log.Info($"✅ LAN Discovery iniciado: {started}");
+
+                if (started)
+                {
+                    // Esperar un poco para que el servicio se estabilice
+                    Thread.Sleep(2000);
+
+                    // Obtener estadísticas iniciales
+                    var initialStats = lanDiscovery.GetStats();
+                    Logger.Log.Info($"📊 Estadísticas iniciales: {initialStats}");
+
+                    // Forzar descubrimiento inmediato
+                    Logger.Log.Info("🚀 Forzando descubrimiento inmediato...");
+                    lanDiscovery.ForceDiscovery();
+
+                    // Esperar para recibir posibles respuestas (5 segundos)
+                    Logger.Log.Info("⏳ Esperando descubrimientos (5 segundos)...");
+                    for (int i = 0; i < 5; i++)
+                    {
+                        Thread.Sleep(1000);
+                        var stats = lanDiscovery.GetStats();
+                        Logger.Log.Info($"   Seg {i + 1}: {stats.ActivePeers} peers activos");
+                    }
+
+                    // Obtener estadísticas finales
+                    var finalStats = lanDiscovery.GetStats();
+                    var discoveredPeers = lanDiscovery.GetDiscoveredPeers();
+
+                    Logger.Log.Info($"📊 Estadísticas finales: {finalStats}");
+                    Logger.Log.Info($"🔍 Resumen: {peersDiscovered} descubiertos, {peersExpired} expirados");
+
+                    // Mostrar detalles de peers descubiertos
+                    if (discoveredPeers.Count > 0)
+                    {
+                        Logger.Log.Info("📋 Lista de peers descubiertos:");
+                        foreach (var peer in discoveredPeers)
+                        {
+                            Logger.Log.Info($"   👥 {peer}");
+                        }
+                    }
+                    else
+                    {
+                        Logger.Log.Info("ℹ️  No se descubrieron peers en la red local (esto es normal en entornos de prueba)");
+                    }
+
+                    // Probar funcionalidad de limpieza
+                    Logger.Log.Info("🧹 Probando limpieza de peers expirados...");
+                    Thread.Sleep(1000);
+
+                    // Detener servicio
+                    lanDiscovery.Stop();
+                    Logger.Log.Info("✅ LAN Discovery detenido");
+                }
+                else
+                {
+                    Logger.Log.Error("❌ No se pudo iniciar LAN Discovery");
+                }
+
+                lanDiscovery.Dispose();
+                Logger.Log.Info("🔍 Pruebas de LAN Discovery completadas");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"❌ Error en pruebas de LAN Discovery: {ex.Message}");
+            }
         }
-        
-        Logger.Log.Info("🌐 Todos los componentes de red funcionando correctamente");
-    }
-    catch (Exception ex)
-    {
-        Logger.Log.Error($"❌ Error en componentes de red: {ex.Message}");
-    }
-}
-
-
 
 
 
