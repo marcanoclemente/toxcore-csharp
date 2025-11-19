@@ -10,6 +10,7 @@ namespace ToxCore.Core
     public class Messenger : IDisposable
     {
         private const string LOG_TAG = "MESSENGER";
+        public GroupManager GroupManager { get; private set; }
 
         // Componentes principales
         public DHT Dht { get; private set; }
@@ -82,6 +83,12 @@ namespace ToxCore.Core
                     }
                 }
 
+                GroupManager = new GroupManager(this);
+                GroupManager.Start();
+
+                Logger.Log.Info($"[{LOG_TAG}] Group Manager iniciado");
+
+
                 _isRunning = true;
                 Logger.Log.Info($"[{LOG_TAG}] Messenger iniciado correctamente");
                 return true;
@@ -112,7 +119,8 @@ namespace ToxCore.Core
                 Dht = null;
                 LANDiscovery?.Stop();
                 LANDiscovery?.Dispose();
-
+                GroupManager?.Stop();
+                GroupManager?.Dispose();
                 Logger.Log.Info($"[{LOG_TAG}] Messenger detenido");
             }
             catch (Exception ex)
