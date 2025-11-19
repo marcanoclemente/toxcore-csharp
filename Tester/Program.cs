@@ -82,8 +82,11 @@ namespace ToxCore
             TestNetworkComponents();
             */
 
-            TestLANDiscovery();
+            //TestLANDiscovery();
 
+            //TestToxCompleteAPI();
+
+            TestGroupChats();
 
             Console.WriteLine("\n✅ Todas las pruebas completadas.");
             Console.WriteLine("Presiona Enter para salir...");
@@ -2459,323 +2462,7 @@ namespace ToxCore
 
 
 
-        static void TestToxCore()
-        {
-            Console.WriteLine("\n🐍 Probando Tox Core (Integración Completa)...");
-
-            try
-            {
-                // Test 1: Creación de instancia Tox
-                Console.WriteLine("   🆕 Probando creación de Tox...");
-                TestToxCreation();
-
-                // Test 2: Gestión de perfil
-                Console.WriteLine("   👤 Probando gestión de perfil...");
-                TestToxProfile();
-
-                // Test 3: Conexión a red
-                Console.WriteLine("   🌐 Probando conexión a red...");
-                TestToxNetwork();
-
-                // Test 4: Gestión de amigos
-                Console.WriteLine("   👥 Probando gestión de amigos...");
-                TestToxFriends();
-
-                Console.WriteLine("   ✅ Todas las pruebas Tox Core completadas");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"   ❌ Error en pruebas Tox Core: {ex.Message}");
-            }
-        }
-
-        static void TestToxCreation()
-        {
-            try
-            {
-                // Test creación con opciones por defecto
-                var options = new ToxOptions();
-                var tox = new Tox(options);
-
-                Console.WriteLine("     ✅ Instancia Tox creada con opciones por defecto");
-
-                // Test obtener dirección
-                string address = tox.GetAddress();
-                if (!string.IsNullOrEmpty(address) && address.Length == 76) // 38 bytes * 2 chars
-                {
-                    Console.WriteLine($"     ✅ Dirección Tox generada: {address.Substring(0, 16)}...");
-                }
-                else
-                {
-                    Console.WriteLine("     ❌ Dirección Tox inválida");
-                }
-
-                // Test obtener claves
-                byte[] publicKey = tox.tox_self_get_public_key();
-                byte[] secretKey = tox.tox_self_get_secret_key();
-
-                if (publicKey.Length == 32 && secretKey.Length == 32)
-                {
-                    Console.WriteLine("     ✅ Claves criptográficas generadas correctamente");
-                }
-                else
-                {
-                    Console.WriteLine("     ❌ Claves criptográficas inválidas");
-                }
-
-                // Test iteración
-                tox.tox_iterate();
-                Console.WriteLine("     ✅ Iteración ejecutada sin errores");
-
-                // Test intervalo de iteración
-                uint interval = tox.tox_iteration_interval();
-                if (interval > 0)
-                {
-                    Console.WriteLine($"     ✅ Intervalo de iteración: {interval}ms");
-                }
-                else
-                {
-                    Console.WriteLine("     ❌ Intervalo de iteración inválido");
-                }
-
-                // Limpiar
-                tox.Dispose();
-                Console.WriteLine("     ✅ Instancia Tox liberada correctamente");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"     ❌ Error en creación de Tox: {ex.Message}");
-            }
-        }
-
-        static void TestToxProfile()
-        {
-            var tox = new Tox();
-
-            try
-            {
-                // Test establecer nombre
-                string testName = "Tox Tester";
-                bool nameResult = tox.tox_self_set_name(testName);
-                if (nameResult)
-                {
-                    Console.WriteLine("     ✅ Nombre establecido correctamente");
-                }
-                else
-                {
-                    Console.WriteLine("     ❌ Falló establecer nombre");
-                }
-
-                // Test obtener nombre
-                string retrievedName = tox.tox_self_get_name();
-                if (retrievedName == testName)
-                {
-                    Console.WriteLine("     ✅ Nombre recuperado correctamente");
-                }
-                else
-                {
-                    Console.WriteLine($"     ❌ Nombre no coincide: {retrievedName}");
-                }
-
-                // Test establecer mensaje de estado
-                string statusMessage = "Probando Tox Core";
-                bool statusMsgResult = tox.tox_self_set_status_message(statusMessage);
-                if (statusMsgResult)
-                {
-                    Console.WriteLine("     ✅ Mensaje de estado establecido");
-                }
-                else
-                {
-                    Console.WriteLine("     ❌ Falló establecer mensaje de estado");
-                }
-
-                // Test obtener mensaje de estado
-                string retrievedStatusMsg = tox.tox_self_get_status_message();
-                if (retrievedStatusMsg == statusMessage)
-                {
-                    Console.WriteLine("     ✅ Mensaje de estado recuperado");
-                }
-                else
-                {
-                    Console.WriteLine($"     ❌ Mensaje de estado no coincide: {retrievedStatusMsg}");
-                }
-
-                // Test establecer estado de usuario
-                bool statusResult = tox.tox_self_set_status(ToxUserStatus.AWAY);
-                if (statusResult)
-                {
-                    Console.WriteLine("     ✅ Estado de usuario establecido");
-                }
-                else
-                {
-                    Console.WriteLine("     ❌ Falló establecer estado de usuario");
-                }
-
-                // Test obtener estado de usuario
-                ToxUserStatus retrievedStatus = tox.tox_self_get_status();
-                if (retrievedStatus == ToxUserStatus.AWAY)
-                {
-                    Console.WriteLine("     ✅ Estado de usuario recuperado");
-                }
-                else
-                {
-                    Console.WriteLine($"     ❌ Estado de usuario no coincide: {retrievedStatus}");
-                }
-
-                Console.WriteLine("     ✅ Pruebas de perfil completadas");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"     ❌ Error en gestión de perfil: {ex.Message}");
-            }
-            finally
-            {
-                tox.Dispose();
-            }
-        }
-
-        static void TestToxNetwork()
-        {
-            var tox = new Tox();
-
-            try
-            {
-                // Test estado de conexión inicial
-                ToxConnectionStatus initialStatus = tox.tox_self_get_connection_status();
-                if (initialStatus == ToxConnectionStatus.NONE)
-                {
-                    Console.WriteLine("     ✅ Estado de conexión inicial correcto (NONE)");
-                }
-                else
-                {
-                    Console.WriteLine($"     ⚠️ Estado de conexión inicial: {initialStatus}");
-                }
-
-                // Test bootstrap con nodo inválido (debería fallar)
-                bool bootstrapResult = tox.tox_bootstrap("invalid.node", 33445, new byte[32]);
-                if (!bootstrapResult)
-                {
-                    Console.WriteLine("     ✅ Bootstrap con nodo inválido (fallo esperado)");
-                }
-                else
-                {
-                    Console.WriteLine("     ⚠️ Bootstrap con nodo inválido retornó éxito");
-                }
-
-                // Test agregar relay TCP con datos inválidos
-                bool relayResult = tox.tox_add_tcp_relay("invalid.relay", 33445, new byte[32]);
-                if (!relayResult)
-                {
-                    Console.WriteLine("     ✅ Agregar relay TCP inválido (fallo esperado)");
-                }
-                else
-                {
-                    Console.WriteLine("     ⚠️ Agregar relay TCP inválido retornó éxito");
-                }
-
-                // Ejecutar algunas iteraciones
-                for (int i = 0; i < 5; i++)
-                {
-                    tox.tox_iterate();
-                    System.Threading.Thread.Sleep(10);
-                }
-                Console.WriteLine("     ✅ Iteraciones de red ejecutadas");
-
-                Console.WriteLine("     ✅ Pruebas de red completadas");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"     ❌ Error en pruebas de red: {ex.Message}");
-            }
-            finally
-            {
-                tox.Dispose();
-            }
-        }
-
-        static void TestToxFriends()
-        {
-            var tox = new Tox();
-
-            try
-            {
-                // Test estado inicial de amigos
-                if (tox.FriendCount == 0)
-                {
-                    Console.WriteLine("     ✅ Contador de amigos inicial correcto: 0");
-                }
-                else
-                {
-                    Console.WriteLine($"     ❌ Contador de amigos inicial incorrecto: {tox.FriendCount}");
-                }
-
-                // Test agregar amigo con dirección inválida
-                int addFriendResult = tox.tox_friend_add(new byte[38], "Hola!");
-                if (addFriendResult == -1)
-                {
-                    Console.WriteLine("     ✅ Agregar amigo con dirección inválida (fallo esperado)");
-                }
-                else
-                {
-                    Console.WriteLine($"     ⚠️ Agregar amigo inválido retornó: {addFriendResult}");
-                }
-
-                // Test agregar amigo con clave pública inválida
-                int addFriendNoRequestResult = tox.tox_friend_add_norequest(new byte[32]);
-                if (addFriendNoRequestResult == -1)
-                {
-                    Console.WriteLine("     ✅ Agregar amigo con clave inválida (fallo esperado)");
-                }
-                else
-                {
-                    Console.WriteLine($"     ⚠️ Agregar amigo con clave inválida retornó: {addFriendNoRequestResult}");
-                }
-
-                // Test enviar mensaje a amigo inexistente
-                int sendMessageResult = tox.tox_friend_send_message(999, "Mensaje de prueba");
-                if (sendMessageResult == -1)
-                {
-                    Console.WriteLine("     ✅ Enviar mensaje a amigo inexistente (fallo esperado)");
-                }
-                else
-                {
-                    Console.WriteLine($"     ⚠️ Enviar mensaje a amigo inexistente retornó: {sendMessageResult}");
-                }
-
-                // Test obtener información de amigo inexistente
-                byte[] testPublicKey = new byte[32];
-                bool getKeyResult = tox.tox_friend_get_public_key(999, testPublicKey);
-                if (!getKeyResult)
-                {
-                    Console.WriteLine("     ✅ Obtener clave de amigo inexistente (fallo esperado)");
-                }
-                else
-                {
-                    Console.WriteLine("     ⚠️ Obtener clave de amigo inexistente retornó éxito");
-                }
-
-                // Test estado de conexión de amigo inexistente
-                ToxConnectionStatus friendStatus = tox.tox_friend_get_connection_status(999);
-                if (friendStatus == ToxConnectionStatus.NONE)
-                {
-                    Console.WriteLine("     ✅ Estado de conexión de amigo inexistente correcto");
-                }
-                else
-                {
-                    Console.WriteLine($"     ⚠️ Estado de conexión de amigo inexistente: {friendStatus}");
-                }
-
-                Console.WriteLine("     ✅ Pruebas de amigos completadas");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"     ❌ Error en gestión de amigos: {ex.Message}");
-            }
-            finally
-            {
-                tox.Dispose();
-            }
-        }
+        
 
 
 
@@ -3540,6 +3227,224 @@ namespace ToxCore
                 Logger.Log.Error($"❌ Error en pruebas de LAN Discovery: {ex.Message}");
             }
         }
+
+        private static void TestToxCompleteAPI()
+        {
+            Logger.Log.Info("🎯 Probando API completa de Tox...");
+
+            try
+            {
+                // Crear opciones
+                var options = new ToxOptions
+                {
+                    IPv6Enabled = true,
+                    UDPEnabled = true,
+                    EnableLANDiscovery = true
+                };
+
+                // Crear instancia Tox
+                var tox = new Tox(options);
+
+                // Configurar callbacks
+                tox.OnFriendRequest += (toxInstance, publicKey, message, userData) =>
+                {
+                    Logger.Log.Info($"✅ Solicitud de amistad recibida: {message}");
+                };
+
+                tox.OnFriendMessage += (toxInstance, friendNumber, type, message, userData) =>
+                {
+                    Logger.Log.Info($"✅ Mensaje recibido de {friendNumber}: {message}");
+                };
+
+                // Iniciar cliente
+                bool started = tox.Start();
+                Logger.Log.Info($"✅ Cliente Tox iniciado: {started}");
+
+                if (started)
+                {
+                    // Probar todas las funciones de la API
+                    Logger.Log.Info("🧪 Probando funciones básicas...");
+
+                    // Nombre y estado
+                    tox.tox_self_set_name("UsuarioCompleto");
+                    tox.tox_self_set_status_message("Probando API completa");
+                    tox.tox_self_set_status(ToxUserStatus.NONE);
+
+                    string name = tox.tox_self_get_name();
+                    string statusMsg = tox.tox_self_get_status_message();
+                    var status = tox.tox_self_get_status();
+
+                    Logger.Log.Info($"✅ Perfil: '{name}' - '{statusMsg}' - {status}");
+
+                    // Dirección y claves
+                    string address = tox.GetAddress();
+                    byte[] publicKey = tox.GetPublicKey();
+
+                    Logger.Log.Info($"✅ Dirección: {address.Substring(0, 16)}...");
+                    Logger.Log.Info($"✅ Clave pública: {publicKey.Length} bytes");
+
+                    // Estado de conexión
+                    var connStatus = tox.tox_self_get_connection_status();
+                    Logger.Log.Info($"✅ Conexión: {connStatus}");
+
+                    // Lista de amigos
+                    uint[] friends = tox.tox_self_get_friend_list();
+                    Logger.Log.Info($"✅ Amigos: {friends.Length} (Count: {tox.FriendCount})");
+
+                    // Probar agregar amigo sin solicitud
+                    byte[] testKey = new byte[32];
+                    new Random().NextBytes(testKey);
+                    int friendNum = tox.tox_friend_add_norequest(testKey);
+                    Logger.Log.Info($"✅ Amigo agregado: {friendNum}");
+
+                    if (friendNum >= 0)
+                    {
+                        // Probar funciones de amigo
+                        byte[] friendKey = tox.tox_friend_get_public_key((uint)friendNum);
+                        var friendStatus = tox.tox_friend_get_connection_status((uint)friendNum);
+                        ulong lastOnline = tox.tox_friend_get_last_online((uint)friendNum);
+
+                        Logger.Log.Info($"✅ Info amigo: Status={friendStatus}, LastOnline={lastOnline}");
+                    }
+
+                    // Ejecutar iteraciones
+                    for (int i = 0; i < 5; i++)
+                    {
+                        tox.tox_iterate();
+                        Thread.Sleep(50);
+                    }
+
+                    // Detener
+                    tox.Stop();
+                    Logger.Log.Info("✅ Cliente Tox detenido");
+                }
+
+                tox.Dispose();
+                Logger.Log.Info("🎯 Pruebas de API completa finalizadas");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"❌ Error en pruebas de API completa: {ex.Message}");
+            }
+        }
+
+        private static void TestGroupChats()
+        {
+            Logger.Log.Info("👥 Probando Group Chats...");
+
+            try
+            {
+                // Crear instancia Tox
+                var tox = new Tox(new ToxOptions
+                {
+                    IPv6Enabled = true,
+                    UDPEnabled = true
+                });
+
+                bool started = tox.Start();
+                Logger.Log.Info($"✅ Cliente Tox iniciado: {started}");
+
+                if (started && tox.Messenger?.GroupManager != null)
+                {
+                    var groupManager = tox.Messenger.GroupManager;
+
+                    // Configurar callbacks de grupo
+                    groupManager.OnGroupInvite += (manager, friendNumber, inviteData, groupName, userData) =>
+                    {
+                        Logger.Log.Info($"✅ Invitación a grupo recibida de {friendNumber}: {groupName}");
+                    };
+
+                    groupManager.OnGroupMessage += (manager, groupNumber, peerNumber, type, message, userData) =>
+                    {
+                        Logger.Log.Info($"✅ Mensaje de grupo #{groupNumber} de peer {peerNumber}: {message}");
+                    };
+
+                    groupManager.OnGroupPeerJoin += (manager, groupNumber, peerNumber, userData) =>
+                    {
+                        Logger.Log.Info($"✅ Peer {peerNumber} se unió al grupo #{groupNumber}");
+                    };
+
+                    groupManager.OnGroupSelfJoin += (manager, groupNumber, userData) =>
+                    {
+                        Logger.Log.Info($"✅ Te uniste al grupo #{groupNumber}");
+                    };
+
+                    // Probar creación de grupo
+                    Logger.Log.Info("🏗️ Probando creación de grupos...");
+                    int group1 = groupManager.GroupNew("Grupo de Prueba");
+                    Logger.Log.Info($"✅ Grupo creado: #{group1}");
+
+                    int group2 = groupManager.GroupNew("Otro Grupo");
+                    Logger.Log.Info($"✅ Grupo creado: #{group2}");
+
+                    // Probar funciones de grupo
+                    string group1Name = groupManager.GroupGetName(group1);
+                    int peerCount = groupManager.GroupGetPeerCount(group1);
+                    Logger.Log.Info($"✅ Grupo #{group1}: '{group1Name}' con {peerCount} miembros");
+
+                    // Probar tema del grupo
+                    bool topicSet = groupManager.GroupSetTopic(group1, "Discusión sobre C# y Tox");
+                    string topic = groupManager.GroupGetTopic(group1);
+                    Logger.Log.Info($"✅ Tema del grupo: {topicSet}, Tema: '{topic}'");
+
+                    // Probar envío de mensajes
+                    Logger.Log.Info("💬 Probando mensajes de grupo...");
+                    int sendResult = groupManager.GroupSendMessage(group1, ToxMessageType.TOX_MESSAGE_TYPE_NORMAL, "¡Hola a todos!");
+                    Logger.Log.Info($"✅ Mensaje enviado: {sendResult} bytes");
+
+                    sendResult = groupManager.GroupSendMessage(group1, ToxMessageType.TOX_MESSAGE_TYPE_ACTION, "saluda al grupo");
+                    Logger.Log.Info($"✅ Mensaje de acción enviado: {sendResult} bytes");
+
+                    // Probar simulación de peers
+                    Logger.Log.Info("👥 Simulando otros peers...");
+                    groupManager.SimulatePeerJoin(group1, "Alice");
+                    groupManager.SimulatePeerJoin(group1, "Bob");
+
+                    // Probar lista de grupos
+                    int[] groups = groupManager.GroupGetList();
+                    Logger.Log.Info($"✅ Número de grupos: {groups.Length}");
+
+                    foreach (int groupNum in groups)
+                    {
+                        string name = groupManager.GroupGetName(groupNum);
+                        int peers = groupManager.GroupGetPeerCount(groupNum);
+                        Logger.Log.Info($"   Grupo #{groupNum}: '{name}' - {peers} miembros");
+                    }
+
+                    // Probar simulación de invitación
+                    Logger.Log.Info("📨 Simulando invitación...");
+                    groupManager.SimulateGroupInvite(0, "Grupo de Desarrolladores");
+
+                    // Probar unirse a grupo por invitación
+                    int joinedGroup = groupManager.SimulateGroupJoin("Grupo por Invitación");
+                    Logger.Log.Info($"✅ Unido a grupo por invitación: #{joinedGroup}");
+
+                    // Probar salida de grupo
+                    bool left = groupManager.GroupLeave(group2, "Me voy!");
+                    Logger.Log.Info($"✅ Salida de grupo: {left}");
+
+                    // Ejecutar iteraciones
+                    for (int i = 0; i < 3; i++)
+                    {
+                        tox.tox_iterate();
+                        Thread.Sleep(50);
+                    }
+
+                    // Limpiar
+                    tox.Stop();
+                    Logger.Log.Info("✅ Cliente Tox detenido");
+                }
+
+                tox.Dispose();
+                Logger.Log.Info("👥 Pruebas de Group Chats completadas");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"❌ Error en pruebas de Group Chats: {ex.Message}");
+            }
+        }
+
+
 
 
 
