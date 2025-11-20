@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using ToxCore.FileTransfer;
 
 namespace ToxCore.Core
 {
@@ -9,6 +11,48 @@ namespace ToxCore.Core
     /// </summary>
     public class Messenger : IDisposable
     {
+        public enum ToxConnection
+        {
+            TOX_CONNECTION_NONE = 0,
+            TOX_CONNECTION_TCP = 1,
+            TOX_CONNECTION_UDP = 2
+        }
+
+        private readonly List<BootstrapNode> _bootstrapNodes = new List<BootstrapNode>
+        {
+            // Nodos oficiales de Tox - actualizados 2024
+            new BootstrapNode("tox.plastiras.org", 33445, "8E7D0B859922EF569298B4D261A8CCB5FEA14FB91ED412A7603A585A25698832"),
+            new BootstrapNode("144.217.167.73", 33445, "7F9C31FE850E97CEFD4C4591DF93FC757C7C12549DDD55F8EEAECC34FE76C029"),
+            new BootstrapNode("tox.abilinski.com", 33445, "10C00EB250C3233E343E2AEBA07115A5C28920E9C8D294302F67BEDFFB5DF67F"),
+            new BootstrapNode("tox.novg.net", 33445, "D527E5847F8330D628DAB1814F0A422F6DC9D0A300E6C357634EE2DA88C35463"),
+            new BootstrapNode("tox.kurnevsky.net", 33445, "82EF82BA33445A1F91A7DB27189ECFC0C013E06E3DA71F588ED692BED625EC23")
+        };
+
+        private int _currentBootstrapIndex = 0;
+        private long _lastBootstrapAttempt = 0;
+        private const int BOOTSTRAP_RETRY_INTERVAL = 30000; // 30 segundos
+        private const int BOOTSTRAP_MAX_ATTEMPTS = 3;
+
+        // ✅ NUEVO: Clase para nodos bootstrap
+        private class BootstrapNode
+        {
+            public string Host { get; }
+            public ushort Port { get; }
+            public byte[] PublicKey { get; }
+
+            public BootstrapNode(string host, ushort port, string publicKeyHex)
+            {
+                Host = host;
+                Port = port;
+                PublicKey = HexStringToByteArray(publicKeyHex);
+            }
+        }
+
+
+        public const int FRIEND_CONNECTION_TIMEOUT = 60000; // 60 segundos
+        public const int PING_INTERVAL = 30000; // 30 segundos
+        public const int PING_TIMEOUT = 10000; // 10 segundos
+
         private const string LOG_TAG = "MESSENGER";
         public GroupManager GroupManager { get; private set; }
 
@@ -19,6 +63,8 @@ namespace ToxCore.Core
         public FriendConnection FriendConn { get; private set; }
         public ToxState State { get; private set; }
         public LANDiscovery LANDiscovery { get; private set; }
+
+        public FileTransferManager FileTransfer { get; private set; }
 
         // Configuración
         private readonly MessengerOptions _options;
@@ -89,6 +135,8 @@ namespace ToxCore.Core
                 Logger.Log.Info($"[{LOG_TAG}] Group Manager iniciado");
 
 
+                FileTransfer = new FileTransferManager(this);
+
                 _isRunning = true;
                 Logger.Log.Info($"[{LOG_TAG}] Messenger iniciado correctamente");
                 return true;
@@ -148,7 +196,7 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// messenger_do - Ejecutar iteración principal (equivalente a do_messenger)
+        /// messenger_do - ACTUALIZADO con bootstrap automático
         /// </summary>
         public void Do()
         {
@@ -156,10 +204,22 @@ namespace ToxCore.Core
 
             try
             {
-                // Ejecutar trabajos periódicos de todos los componentes
+                // 1. Bootstrap automático si no hay suficientes nodos DHT
+                if (Dht?.ActiveNodes < 10) // Si tenemos menos de 10 nodos activos
+                {
+                    PerformAutomaticBootstrap();
+                }
+
+                // 2. Ejecutar trabajos periódicos de todos los componentes
                 Dht?.DoPeriodicWork();
                 Onion?.DoPeriodicWork();
                 FriendConn?.Do_periodic_work();
+
+                // 3. LAN Discovery si está habilitado
+                if (_options.EnableLANDiscovery)
+                {
+                    // LAN Discovery ya maneja su propio trabajo periódico
+                }
             }
             catch (Exception ex)
             {
@@ -168,7 +228,7 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// messenger_bootstrap - Conectar a la red Tox
+        /// Bootstrap - MEJORADO con múltiples intentos y mejor manejo de errores
         /// </summary>
         public bool Bootstrap(string host, ushort port, byte[] publicKey)
         {
@@ -182,35 +242,77 @@ namespace ToxCore.Core
             {
                 Logger.Log.InfoF($"[{LOG_TAG}] Bootstrap a {host}:{port}");
 
-                // Usar el método de red existente para crear IPPort
-                var ipPort = new IPPort();
-                bool ipSuccess = Network.BytesToIPPort(ref ipPort, System.Text.Encoding.UTF8.GetBytes(host), 0, port);
-
-                if (!ipSuccess)
+                // ✅ MEJORADO: Usar DNS resolution real
+                IPAddress[] addresses;
+                try
                 {
-                    Logger.Log.Error($"[{LOG_TAG}] No se pudo resolver host: {host}");
+                    addresses = Dns.GetHostAddresses(host);
+                    if (addresses.Length == 0)
+                    {
+                        Logger.Log.Error($"[{LOG_TAG}] No se pudo resolver host: {host}");
+                        return false;
+                    }
+                }
+                catch (Exception dnsEx)
+                {
+                    Logger.Log.ErrorF($"[{LOG_TAG}] Error DNS para {host}: {dnsEx.Message}");
                     return false;
                 }
 
-                // Bootstrap en DHT - usar método existente
-                int result = Dht.DHT_bootstrap(ipPort, publicKey);
-                bool success = result == 0;
-
-                if (success)
+                // Intentar con todas las direcciones IP resueltas
+                foreach (var ipAddress in addresses)
                 {
-                    Logger.Log.Info($"[{LOG_TAG}] Bootstrap exitoso a {host}:{port}");
-                }
-                else
-                {
-                    Logger.Log.Warning($"[{LOG_TAG}] Bootstrap falló a {host}:{port}");
+                    try
+                    {
+                        var ipPort = new IPPort(new IP(ipAddress), port);
+
+                        // Bootstrap en DHT
+                        int result = Dht.DHT_bootstrap(ipPort, publicKey);
+                        bool success = result == 0;
+
+                        if (success)
+                        {
+                            Logger.Log.Info($"[{LOG_TAG}] Bootstrap exitoso a {ipAddress}:{port}");
+                            return true;
+                        }
+                    }
+                    catch (Exception ipEx)
+                    {
+                        Logger.Log.WarningF($"[{LOG_TAG}] Bootstrap falló para {ipAddress}: {ipEx.Message}");
+                    }
                 }
 
-                return success;
+                Logger.Log.Warning($"[{LOG_TAG}] Todos los intentos de bootstrap fallaron para {host}");
+                return false;
             }
             catch (Exception ex)
             {
                 Logger.Log.ErrorF($"[{LOG_TAG}] Error en bootstrap: {ex.Message}");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// BootstrapMultiple - Bootstrap a múltiples nodos simultáneamente
+        /// </summary>
+        public void BootstrapMultiple(params (string host, ushort port, string publicKeyHex)[] nodes)
+        {
+            if (!_isRunning) return;
+
+            foreach (var node in nodes)
+            {
+                try
+                {
+                    byte[] publicKey = HexStringToByteArray(node.publicKeyHex);
+                    if (publicKey != null)
+                    {
+                        Task.Run(() => Bootstrap(node.host, node.port, publicKey));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Error en bootstrap múltiple para {node.host}: {ex.Message}");
+                }
             }
         }
 
@@ -422,6 +524,69 @@ namespace ToxCore.Core
                 Logger.Log.WarningF($"[{LOG_TAG}] Error guardando amigo en estado: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// PerformAutomaticBootstrap - Bootstrap automático como en toxcore
+        /// </summary>
+        private void PerformAutomaticBootstrap()
+        {
+            try
+            {
+                long currentTime = DateTime.UtcNow.Ticks;
+
+                // Esperar entre intentos de bootstrap
+                if ((currentTime - _lastBootstrapAttempt) < TimeSpan.TicksPerMillisecond * BOOTSTRAP_RETRY_INTERVAL)
+                    return;
+
+                _lastBootstrapAttempt = currentTime;
+
+                // Intentar con el siguiente nodo en la lista
+                var bootstrapNode = _bootstrapNodes[_currentBootstrapIndex];
+                _currentBootstrapIndex = (_currentBootstrapIndex + 1) % _bootstrapNodes.Count;
+
+                Logger.Log.InfoF($"[{LOG_TAG}] Intentando bootstrap automático con {bootstrapNode.Host}:{bootstrapNode.Port}");
+
+                bool success = Bootstrap(bootstrapNode.Host, bootstrapNode.Port, bootstrapNode.PublicKey);
+
+                if (success)
+                {
+                    Logger.Log.Info($"[{LOG_TAG}] Bootstrap automático exitoso");
+                }
+                else
+                {
+                    Logger.Log.Warning($"[{LOG_TAG}] Bootstrap automático falló, siguiente intento en {BOOTSTRAP_RETRY_INTERVAL / 1000} segundos");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en bootstrap automático: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// HexStringToByteArray - Convierte string hex a byte[] (auxiliar para bootstrap)
+        /// </summary>
+        private static byte[] HexStringToByteArray(string hex)
+        {
+            try
+            {
+                int numberChars = hex.Length;
+                byte[] bytes = new byte[numberChars / 2];
+                for (int i = 0; i < numberChars; i += 2)
+                {
+                    bytes[i / 2] = Convert.ToByte(hex.Substring(i, 2), 16);
+                }
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[MESSENGER] Error convirtiendo hex a bytes: {ex.Message}");
+                return null;
+            }
+        }
+
+
+
 
         public void Dispose()
         {

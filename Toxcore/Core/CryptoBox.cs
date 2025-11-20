@@ -15,6 +15,14 @@ namespace ToxCore.Core
         public const int NONCEBYTES = 24;
         public const int MACBYTES = 16;
 
+        public const int CRYPTO_NONCE_SIZE = 24;
+        public const int CRYPTO_MAC_SIZE = 16;
+        public const int CRYPTO_PUBLIC_KEY_SIZE = 32;
+        public const int CRYPTO_SECRET_KEY_SIZE = 32;
+        public const int CRYPTO_SHARED_KEY_SIZE = 32;
+        public const int CRYPTO_SYMMETRIC_KEY_SIZE = 32;
+
+
         private static readonly RandomNumberGenerator rng = RandomNumberGenerator.Create();
 
         /// <summary>
@@ -82,10 +90,10 @@ namespace ToxCore.Core
         /// </summary>
         public static byte[] BeforeNm(byte[] publicKey, byte[] secretKey)
         {
-            if (publicKey == null || publicKey.Length != PUBLICKEYBYTES)
-                throw new ArgumentException($"Public key must be {PUBLICKEYBYTES} bytes");
-            if (secretKey == null || secretKey.Length != SECRETKEYBYTES)
-                throw new ArgumentException($"Secret key must be {SECRETKEYBYTES} bytes");
+            if (publicKey == null || publicKey.Length != CRYPTO_PUBLIC_KEY_SIZE)
+                throw new ArgumentException($"Public key must be {CRYPTO_PUBLIC_KEY_SIZE} bytes");
+            if (secretKey == null || secretKey.Length != CRYPTO_SECRET_KEY_SIZE)
+                throw new ArgumentException($"Secret key must be {CRYPTO_SECRET_KEY_SIZE} bytes");
 
             return ScalarMult.Mult(secretKey, publicKey);
         }
@@ -142,7 +150,7 @@ namespace ToxCore.Core
             rng.GetBytes(nonce);
             return nonce;
         }
-
+        
         /// <summary>
         /// Test exhaustivo de todas las funcionalidades
         /// </summary>
@@ -366,5 +374,8 @@ namespace ToxCore.Core
             byte[] randomNonce = CryptoBox.GenerateNonce();
             Buffer.BlockCopy(randomNonce, 0, nonce, 0, CryptoBox.NONCEBYTES);
         }
+
     }
+   
+
 }

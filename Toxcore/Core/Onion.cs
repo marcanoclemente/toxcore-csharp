@@ -14,7 +14,11 @@ namespace ToxCore.Core
         public byte[] PublicKey { get; set; }
         public long LastPinged { get; set; }
         public bool IsActive { get; set; }
-        public int RTT { get; set; }
+        public int RTT { get; set; } // Round Trip Time en ms
+        public int SuccessRate { get; set; } // ✅ NUEVO - porcentaje de éxito
+        public long FirstSeen { get; set; } // ✅ NUEVO - cuando descubrimos el nodo
+        public int PacketsForwarded { get; set; } // ✅ NUEVO - contador de paquetes
+        public int FailedForwards { get; set; } // ✅ NUEVO - contador de fallos
 
         public OnionNode(IPPort ipp, byte[] publicKey)
         {
@@ -27,11 +31,49 @@ namespace ToxCore.Core
             LastPinged = DateTime.UtcNow.Ticks;
             IsActive = true;
             RTT = 0;
+            SuccessRate = 100; // ✅ NUEVO - empezar con 100%
+            FirstSeen = DateTime.UtcNow.Ticks; // ✅ NUEVO
+            PacketsForwarded = 0; // ✅ NUEVO
+            FailedForwards = 0; // ✅ NUEVO
         }
 
-        public override string ToString()
+        // ✅ NUEVO - Calcular score del nodo
+        public double CalculateScore()
         {
-            return $"{IPPort} [PK: {BitConverter.ToString(PublicKey, 0, 8).Replace("-", "")}...]";
+            double score = 0.0;
+
+            // RTT más bajo = mejor score (máx 1000ms = 0 puntos)
+            if (RTT > 0 && RTT <= Onion.ONION_PATH_MAX_LATENCY)
+            {
+                score += (Onion.ONION_PATH_MAX_LATENCY - RTT) * 0.5; // RTT contribuye 50%
+            }
+
+            // Success rate (porcentaje de éxito)
+            score += SuccessRate * 0.3; // Success rate contribuye 30%
+
+            // Tiempo activo (más tiempo = más confiable)
+            long uptime = (DateTime.UtcNow.Ticks - FirstSeen) / TimeSpan.TicksPerMillisecond;
+            if (uptime > Onion.ONION_NODE_MIN_UPTIME)
+            {
+                score += Math.Min(100, uptime / Onion.ONION_NODE_MIN_UPTIME * 10); // Uptime contribuye 20%
+            }
+
+            return score;
+        }
+
+        // ✅ NUEVO - Actualizar métricas después de un forward exitoso
+        public void RecordSuccessfulForward()
+        {
+            PacketsForwarded++;
+            SuccessRate = (int)((double)PacketsForwarded / (PacketsForwarded + FailedForwards) * 100);
+            LastPinged = DateTime.UtcNow.Ticks;
+        }
+
+        // ✅ NUEVO - Actualizar métricas después de un forward fallido
+        public void RecordFailedForward()
+        {
+            FailedForwards++;
+            SuccessRate = (int)((double)PacketsForwarded / (PacketsForwarded + FailedForwards) * 100);
         }
     }
 
@@ -74,6 +116,10 @@ namespace ToxCore.Core
         public const int ONION_PATH_TIMEOUT = 1200000;
         public const int MAX_ONION_PATHS = 6;
         public const int ONION_NODE_TIMEOUT = 1800000; // 30 minutos
+
+        public const int ONION_PATH_MAX_LATENCY = 1000; // 1 segundo máximo RTT
+        public const int ONION_NODE_MIN_UPTIME = 300000; // 5 minutos mínimos de actividad
+        public const int ONION_PATH_HEALTH_CHECK_INTERVAL = 60000; // 60 segundos
 
         public byte[] SelfPublicKey { get; private set; }
         public byte[] SelfSecretKey { get; private set; }
@@ -207,6 +253,85 @@ namespace ToxCore.Core
                                  .First();
             }
         }
+
+        /// <summary>
+        /// SelectOptimalOnionPath - Selección REAL de paths como en onion.c
+        /// Considera RTT, estabilidad, capacidad de nodos
+        /// </summary>
+        private OnionPath SelectOptimalOnionPath()
+        {
+            try
+            {
+                lock (_pathsLock)
+                {
+                    var activePaths = _onionPaths.Where(p => p.IsActive).ToList();
+                    if (activePaths.Count == 0)
+                    {
+                        // Crear nuevo path si no hay activos
+                        int newPath = CreateOnionPath();
+                        if (newPath >= 0)
+                        {
+                            return _onionPaths.Find(p => p.PathNumber == newPath);
+                        }
+                        return null;
+                    }
+
+                    // Calcular score para cada path
+                    var scoredPaths = activePaths.Select(path => new
+                    {
+                        Path = path,
+                        Score = CalculatePathScore(path)
+                    }).ToList();
+
+                    // Seleccionar path con mejor score
+                    var bestPath = scoredPaths.OrderByDescending(sp => sp.Score).First();
+
+                    Logger.Log.TraceF($"[{LOG_TAG}] Path seleccionado: #{bestPath.Path.PathNumber} (Score: {bestPath.Score:F2})");
+                    return bestPath.Path;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error seleccionando path óptimo: {ex.Message}");
+                return _onionPaths.FirstOrDefault(p => p.IsActive);
+            }
+        }
+
+        /// <summary>
+        /// CalculatePathScore - Calcula score REAL de un path onion
+        /// </summary>
+        private double CalculatePathScore(OnionPath path)
+        {
+            if (path == null || path.Nodes.Any(n => n == null)) return 0.0;
+
+            double totalScore = 0.0;
+            int nodeCount = 0;
+
+            foreach (var node in path.Nodes)
+            {
+                if (node != null && node.IsActive)
+                {
+                    totalScore += node.CalculateScore();
+                    nodeCount++;
+                }
+            }
+
+            if (nodeCount == 0) return 0.0;
+
+            // Score promedio de los nodos
+            double averageNodeScore = totalScore / nodeCount;
+
+            // Penalizar paths viejos (preferir paths más recientes)
+            long pathAge = (DateTime.UtcNow.Ticks - path.CreationTime) / TimeSpan.TicksPerMillisecond;
+            double agePenalty = Math.Max(0, 100 - (pathAge / 60000)); // Penalizar después de 1 minuto
+
+            // Bonus por uso reciente
+            long timeSinceLastUse = (DateTime.UtcNow.Ticks - path.LastUsed) / TimeSpan.TicksPerMillisecond;
+            double recencyBonus = timeSinceLastUse < 30000 ? 50 : 0; // Bonus si se usó en últimos 30 segundos
+
+            return averageNodeScore + agePenalty + recencyBonus;
+        }
+
 
         /// <summary>
         /// onion_send_2 - Compatible con onion_send_2 del original
@@ -558,15 +683,14 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// Reenvía un paquete onion al siguiente nodo
+        /// ForwardOnionPacket - ACTUALIZADO para registrar métricas REALES
         /// </summary>
         private int ForwardOnionPacket(byte[] data, int length, byte[] nextPublicKey)
         {
             try
             {
-                // Buscar el nodo onion por su public key
                 var nextNode = FindOnionNodeByPublicKey(nextPublicKey);
-                if (nextNode == null) // ✅ CORRECCIÓN: Comparación con null funciona
+                if (nextNode == null)
                 {
                     Logger.Log.WarningF($"[{LOG_TAG}] Nodo onion no encontrado para reenvío");
                     return -1;
@@ -574,10 +698,18 @@ namespace ToxCore.Core
 
                 // Enviar paquete al siguiente nodo
                 int sent = Network.socket_send(Socket, data, length, nextNode.IPPort);
+
                 if (sent > 0)
                 {
-                    nextNode.LastPinged = DateTime.UtcNow.Ticks;
-                    Logger.Log.TraceF($"[{LOG_TAG}] Paquete onion reenviado a {nextNode.IPPort}");
+                    // ✅ REGISTRAR MÉTRICA DE ÉXITO
+                    nextNode.RecordSuccessfulForward();
+                    Logger.Log.TraceF($"[{LOG_TAG}] Paquete onion reenviado a {nextNode.IPPort} (Success: {nextNode.SuccessRate}%)");
+                }
+                else
+                {
+                    // ✅ REGISTRAR MÉTRICA DE FALLO
+                    nextNode.RecordFailedForward();
+                    Logger.Log.WarningF($"[{LOG_TAG}] Falló reenvío a {nextNode.IPPort} (Success: {nextNode.SuccessRate}%)");
                 }
 
                 return sent;
@@ -730,12 +862,14 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// Determina si un nodo DHT es buen candidato para onion routing
+        /// IsGoodOnionNode - Verificación REAL de nodos onion como en onion.c
         /// </summary>
         private bool IsGoodOnionNode(DHTNode node)
         {
-            // Verificar que el nodo esté activo y tenga buen RTT
-            if (!node.IsActive || node.RTT <= 0 || node.RTT > 1000) // RTT máximo de 1 segundo
+            if (node == null || !node.IsActive) return false;
+
+            // Verificar RTT razonable
+            if (node.RTT <= 0 || node.RTT > ONION_PATH_MAX_LATENCY)
                 return false;
 
             // Verificar que no sea nuestro propio nodo
@@ -746,7 +880,127 @@ namespace ToxCore.Core
             if (node.EndPoint.Port == 0 || node.EndPoint.IP.Data == null)
                 return false;
 
+            // Verificar que haya estado activo por un tiempo mínimo
+            long nodeUptime = (DateTime.UtcNow.Ticks - node.LastSeen) / TimeSpan.TicksPerMillisecond;
+            if (nodeUptime < ONION_NODE_MIN_UPTIME)
+                return false;
+
+            // Verificar calidad de conexión (basado en RTT y estabilidad)
+            if (node.RTT > 500) // Más de 500ms es considerado lento
+                return false;
+
             return true;
+        }
+
+        /// <summary>
+        /// MaintainOnionPaths - Mantenimiento REAL como en onion.c
+        /// </summary>
+        private void MaintainOnionPaths()
+        {
+            try
+            {
+                long currentTime = DateTime.UtcNow.Ticks;
+                int pathsReplaced = 0;
+                int pathsCreated = 0;
+
+                lock (_pathsLock)
+                {
+                    // 1. Reemplazar paths con nodos problemáticos
+                    for (int i = _onionPaths.Count - 1; i >= 0; i--)
+                    {
+                        var path = _onionPaths[i];
+                        if (!path.IsActive) continue;
+
+                        double pathScore = CalculatePathScore(path);
+
+                        // Reemplazar paths con score bajo
+                        if (pathScore < 50.0) // Score mínimo aceptable
+                        {
+                            _onionPaths.RemoveAt(i);
+                            pathsReplaced++;
+
+                            Logger.Log.DebugF($"[{LOG_TAG}] Path #{path.PathNumber} removido (Score: {pathScore:F2})");
+
+                            // Crear reemplazo
+                            int newPath = CreateOnionPath();
+                            if (newPath >= 0) pathsCreated++;
+                        }
+                    }
+
+                    // 2. Asegurar número mínimo de paths activos
+                    int activePaths = _onionPaths.Count(p => p.IsActive);
+                    int pathsNeeded = Math.Max(2, MAX_ONION_PATHS / 2); // Al menos 2 paths o la mitad del máximo
+
+                    while (activePaths < pathsNeeded && _onionPaths.Count < MAX_ONION_PATHS)
+                    {
+                        int newPath = CreateOnionPath();
+                        if (newPath >= 0)
+                        {
+                            activePaths++;
+                            pathsCreated++;
+                        }
+                        else
+                        {
+                            break; // No se pudo crear más paths
+                        }
+                    }
+                }
+
+                if (pathsReplaced > 0 || pathsCreated > 0)
+                {
+                    Logger.Log.InfoF($"[{LOG_TAG}] Mantenimiento: {pathsReplaced} paths reemplazados, {pathsCreated} creados");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en mantenimiento de paths: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// PerformHealthChecks - Verificación de salud REAL de nodos onion
+        /// </summary>
+        private void PerformHealthChecks()
+        {
+            try
+            {
+                lock (_nodesLock)
+                {
+                    long currentTime = DateTime.UtcNow.Ticks;
+                    int checksPerformed = 0;
+                    int nodesMarkedInactive = 0;
+
+                    foreach (var node in _onionNodes)
+                    {
+                        if (!node.IsActive) continue;
+
+                        long timeSinceLastActivity = (currentTime - node.LastPinged) / TimeSpan.TicksPerMillisecond;
+
+                        // Si no ha habido actividad reciente, verificar salud
+                        if (timeSinceLastActivity > ONION_PATH_HEALTH_CHECK_INTERVAL)
+                        {
+                            checksPerformed++;
+
+                            // Nodo con muchos fallos recientes se marca como inactivo
+                            if (node.SuccessRate < 30) // Menos del 30% de éxito
+                            {
+                                node.IsActive = false;
+                                nodesMarkedInactive++;
+                                Logger.Log.DebugF($"[{LOG_TAG}] Nodo onion marcado inactivo (Success: {node.SuccessRate}%)");
+                            }
+                        }
+                    }
+
+                    if (nodesMarkedInactive > 0)
+                    {
+                        Logger.Log.InfoF($"[{LOG_TAG}] Health check: {nodesMarkedInactive}/{checksPerformed} nodos marcados inactivos");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en health check: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -833,7 +1087,7 @@ namespace ToxCore.Core
         // ==================== AGREGAR ESTE MÉTODO A LA CLASE ONION ====================
 
         /// <summary>
-        /// DoPeriodicWork - Mantenimiento periódico de Onion
+        /// DoPeriodicWork - ACTUALIZADO con mantenimiento REAL
         /// </summary>
         public void DoPeriodicWork()
         {
@@ -843,22 +1097,27 @@ namespace ToxCore.Core
             {
                 long currentTime = DateTime.UtcNow.Ticks;
 
-                // Limpiar nodos y paths antiguos
-                CleanupOldOnionNodes();
-                CleanupExpiredPaths();
+                // 1. Health check de nodos
+                PerformHealthChecks();
 
-                // Crear nuevos paths si es necesario
-                if (_onionPaths.Count < 2 && (currentTime - _lastMaintenanceTime) > TimeSpan.TicksPerSecond * 60)
+                // 2. Mantenimiento de paths
+                if ((currentTime - _lastMaintenanceTime) > TimeSpan.TicksPerMillisecond * 120000) // Cada 2 minutos
                 {
-                    CreateOnionPath();
+                    MaintainOnionPaths();
                     _lastMaintenanceTime = currentTime;
                 }
 
-                // Log estadísticas periódicas
-                if ((currentTime - _lastMaintenanceTime) > TimeSpan.TicksPerSecond * 120)
+                // 3. Limpieza de nodos antiguos (existente)
+                CleanupOldOnionNodes();
+
+                // 4. Log estadísticas periódicas
+                if ((currentTime - _lastLogTime) > TimeSpan.TicksPerSecond * 120)
                 {
-                    Logger.Log.DebugF($"[{LOG_TAG}] Estadísticas - Nodos: {TotalOnionNodes}, Paths: {TotalPaths}, Activos: {ActivePaths}");
-                    _lastMaintenanceTime = currentTime;
+                    int healthyNodes = _onionNodes.Count(n => n.IsActive && n.SuccessRate > 70);
+                    int optimalPaths = _onionPaths.Count(p => p.IsActive && CalculatePathScore(p) > 70.0);
+
+                    Logger.Log.DebugF($"[{LOG_TAG}] Estadísticas - Nodos: {TotalOnionNodes} total, {healthyNodes} saludables, Paths: {TotalPaths} total, {optimalPaths} óptimos");
+                    _lastLogTime = currentTime;
                 }
             }
             catch (Exception ex)

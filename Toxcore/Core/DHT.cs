@@ -112,6 +112,14 @@ namespace ToxCore.Core
         public const int DHT_PING_INTERVAL = 30000; // 30 segundos
         public const int DHT_PING_TIMEOUT = 10000;  // 10 segundos
 
+        public const int CRYPTO_SYMMETRIC_KEY_SIZE = 32;
+        public const int CRYPTO_MAC_SIZE = 16;
+
+        // Constantes específicas de DHT
+        public const int DHT_PING_SIZE = 64;
+        public const int DHT_PONG_SIZE = 64;
+        public const int MAX_CRYPTO_PACKET_SIZE = 1024;
+
 
         private long _lastCleanupTime = 0;
 
@@ -518,30 +526,37 @@ namespace ToxCore.Core
 
 
         /// <summary>
-        /// Manejar paquetes DHT REAL con encriptación
+        /// DHT_handle_packet - ACTUALIZADO para usar handshake real
         /// </summary>
         public int DHT_handle_packet(byte[] packet, int length, IPPort source)
         {
-            if (packet == null || length < 1 + CRYPTO_NONCE_SIZE) return -1;
+            if (packet == null || length < 1 + CRYPTO_PUBLIC_KEY_SIZE) return -1;
 
             try
             {
                 byte packetType = packet[0];
 
+                // Paquetes encriptados van directamente a HandleCryptopacket
+                if (packetType >= 0x80) // Paquetes encriptados (como en toxcore)
+                {
+                    // Intentar con nuestra public key primero
+                    int result = HandleCryptopacket(source, packet, length, SelfPublicKey);
+                    if (result == 0) return 0;
+
+                    // Si falla, podría ser para otro peer (enrutamiento)
+                    // Aquí iría lógica adicional de enrutamiento DHT
+                    return -1;
+                }
+
+                // Paquetes no-encriptados (para compatibilidad)
                 switch (packetType)
                 {
-                    case 0x00: // Ping request encriptado
-                        return HandleEncryptedPingRequest(packet, length, source);
-                    case 0x02: // Get nodes request encriptado  
-                        return HandleEncryptedGetNodesRequest(packet, length, source);
-                    case 0x04: // Send nodes response encriptado
-                        return HandleEncryptedSendNodesResponse(packet, length, source);
                     case 0x10: // Handshake request
                         return HandleHandshakeRequest(packet, length, source);
-                    case 0x11: // Handshake response
+                    case 0x11: // Handshake response  
                         return HandleHandshakeResponse(packet, length, source);
                     default:
-                        Logger.Log.DebugF($"[{LOG_TAG}] Tipo de paquete desconocido: 0x{packetType:X2}");
+                        Logger.Log.DebugF($"[{LOG_TAG}] Tipo de paquete no-encriptado desconocido: 0x{packetType:X2}");
                         return -1;
                 }
             }
@@ -608,6 +623,213 @@ namespace ToxCore.Core
             }
         }
 
+        /// <summary>
+        /// HandleCryptopacket - Como en DHT.c cryptopacket_handle()
+        /// Maneja paquetes encriptados DHT reales
+        /// </summary>
+        public int HandleCryptopacket(IPPort source, byte[] packet, int length, byte[] publicKey)
+        {
+            if (packet == null || length < CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + CRYPTO_MAC_SIZE + 1)
+                return -1;
+
+            try
+            {
+                // 1. Calcular shared key para decryptar
+                byte[] sharedKey = new byte[CRYPTO_SYMMETRIC_KEY_SIZE];
+                int keyResult = DHT_get_shared_key_recv(sharedKey, packet, SelfSecretKey);
+                if (keyResult == -1) return -1;
+
+                // 2. Extraer nonce (bytes 32-55)
+                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
+                Buffer.BlockCopy(packet, CRYPTO_PUBLIC_KEY_SIZE, nonce, 0, CRYPTO_NONCE_SIZE);
+
+                // 3. Extraer datos encriptados (resto del paquete)
+                int encryptedLength = length - CRYPTO_PUBLIC_KEY_SIZE - CRYPTO_NONCE_SIZE;
+                byte[] encrypted = new byte[encryptedLength];
+                Buffer.BlockCopy(packet, CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encrypted, 0, encryptedLength);
+
+                // 4. Decryptar usando crypto_box_open_afternm
+                byte[] decrypted = CryptoBox.OpenAfterNm(encrypted, nonce, sharedKey);
+                if (decrypted == null) return -1;
+
+                // 5. Procesar el paquete decryptado basado en su tipo
+                return ProcessDecryptedDhtPacket(source, decrypted, decrypted.Length, publicKey);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleCryptopacket: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// ProcessDecryptedDhtPacket - Procesa paquetes DHT decryptados
+        /// </summary>
+        private int ProcessDecryptedDhtPacket(IPPort source, byte[] decrypted, int length, byte[] expectedPublicKey)
+        {
+            if (decrypted == null || length < 1) return -1;
+
+            byte packetType = decrypted[0];
+
+            switch (packetType)
+            {
+                case 0x00: // Ping request
+                    return HandleDecryptedPingRequest(source, decrypted, length, expectedPublicKey);
+
+                case 0x01: // Ping response  
+                    return HandleDecryptedPingResponse(source, decrypted, length, expectedPublicKey);
+
+                case 0x02: // Get nodes request
+                    return HandleDecryptedGetNodesRequest(source, decrypted, length, expectedPublicKey);
+
+                case 0x04: // Send nodes response
+                    return HandleDecryptedSendNodesResponse(source, decrypted, length, expectedPublicKey);
+
+                default:
+                    Logger.Log.DebugF($"[{LOG_TAG}] Tipo de paquete DHT desconocido: 0x{packetType:X2}");
+                    return -1;
+            }
+        }
+
+
+        /// <summary>
+        /// HandleDecryptedPingRequest - Como en DHT.c handle_ping_request()
+        /// </summary>
+        private int HandleDecryptedPingRequest(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
+        {
+            if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE) return -1;
+
+            try
+            {
+                // Extraer public key del ping (bytes 1-32)
+                byte[] senderPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Verificar que coincide con la key esperada
+                if (!CryptoVerify.Verify32(senderPublicKey, expectedPublicKey))
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en ping request");
+                    return -1;
+                }
+
+                // Agregar/actualizar nodo
+                AddNode(senderPublicKey, source);
+
+                // Enviar pong response
+                byte[] pongResponse = CreateDhtPongResponse(senderPublicKey);
+                if (pongResponse != null)
+                {
+                    return DHT_send_packet(source, pongResponse, pongResponse.Length);
+                }
+
+                return -1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleDecryptedPingRequest: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// HandleDecryptedPingResponse - Maneja respuesta PONG encriptada
+        /// </summary>
+        private int HandleDecryptedPingResponse(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
+        {
+            if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE) return -1;
+
+            try
+            {
+                // Extraer public key del pong (bytes 1-32)
+                byte[] senderPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Verificar que coincide con la key esperada
+                if (!CryptoVerify.Verify32(senderPublicKey, expectedPublicKey))
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en ping response");
+                    return -1;
+                }
+
+                // Actualizar nodo - marcar como activo y actualizar last seen
+                AddNode(senderPublicKey, source);
+
+                Logger.Log.DebugF($"[{LOG_TAG}] Ping response recibido de {source}");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleDecryptedPingResponse: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// CreateDhtPongResponse - Crea respuesta PONG encriptada real
+        /// </summary>
+        private byte[] CreateDhtPongResponse(byte[] destinationPublicKey)
+        {
+            try
+            {
+                // Crear payload PONG: [0x01][nuestra_public_key]
+                byte[] pongPayload = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE];
+                pongPayload[0] = 0x01; // PONG type
+                Buffer.BlockCopy(SelfPublicKey, 0, pongPayload, 1, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Encriptar el pong
+                return CreateCryptopacket(pongPayload, pongPayload.Length, destinationPublicKey, SelfSecretKey);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando pong response: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// CreateCryptopacket - Como en DHT.c create_crypto_packet()
+        /// Crea paquetes encriptados DHT reales
+        /// </summary>
+        public byte[] CreateCryptopacket(byte[] data, int length, byte[] publicKey, byte[] secretKey)
+        {
+            try
+            {
+                if (data == null || length > MAX_CRYPTO_PACKET_SIZE)
+                    return null;
+
+                // 1. Generar keypair temporal para este paquete
+                var tempKeyPair = CryptoBox.GenerateKeyPair();
+                byte[] tempPublicKey = tempKeyPair.PublicKey;
+                byte[] tempSecretKey = tempKeyPair.PrivateKey;
+
+                // 2. Calcular shared key
+                byte[] sharedKey = CryptoBox.BeforeNm(publicKey, tempSecretKey);
+                if (sharedKey == null) return null;
+
+                // 3. Generar nonce
+                byte[] nonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
+
+                // 4. Encriptar datos con crypto_box_afternm
+                byte[] encrypted = CryptoBox.AfterNm(data, nonce, sharedKey);
+                if (encrypted == null) return null;
+
+                // 5. Construir paquete final: [temp_public_key(32)][nonce(24)][encrypted_data]
+                byte[] packet = new byte[CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + encrypted.Length];
+                Buffer.BlockCopy(tempPublicKey, 0, packet, 0, CRYPTO_PUBLIC_KEY_SIZE);
+                Buffer.BlockCopy(nonce, 0, packet, CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(encrypted, 0, packet, CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encrypted.Length);
+
+                return packet;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en CreateCryptopacket: {ex.Message}");
+                return null;
+            }
+        }
+
+
+
         private int HandleEncryptedGetNodesRequest(byte[] packet, int length, IPPort source)
         {
             try
@@ -648,6 +870,91 @@ namespace ToxCore.Core
             {
                 Logger.Log.ErrorF($"[{LOG_TAG}] Error en get_nodes: {ex.Message}");
                 return -1;
+            }
+        }
+
+        /// <summary>
+        /// HandleDecryptedGetNodesRequest - Maneja solicitud GET_NODES encriptada
+        /// </summary>
+        private int HandleDecryptedGetNodesRequest(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
+        {
+            if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE * 2) return -1;
+
+            try
+            {
+                // Extraer public key del solicitante (bytes 1-32)
+                byte[] senderPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Extraer public key objetivo de búsqueda (bytes 33-64)
+                byte[] targetPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, targetPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Verificar que la key del solicitante coincide
+                if (!CryptoVerify.Verify32(senderPublicKey, expectedPublicKey))
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en get_nodes request");
+                    return -1;
+                }
+
+                // Agregar/actualizar nodo del solicitante
+                AddNode(senderPublicKey, source);
+
+                // Obtener nodos más cercanos al objetivo
+                var closestNodes = GetClosestNodes(targetPublicKey, 4); // 4 nodos como en toxcore
+                if (closestNodes.Count > 0)
+                {
+                    // Enviar respuesta SEND_NODES
+                    byte[] nodesResponse = CreateDhtSendNodesResponse(senderPublicKey, closestNodes);
+                    if (nodesResponse != null)
+                    {
+                        return DHT_send_packet(source, nodesResponse, nodesResponse.Length);
+                    }
+                }
+
+                return -1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleDecryptedGetNodesRequest: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// CreateDhtSendNodesResponse - Crea respuesta SEND_NODES encriptada
+        /// </summary>
+        private byte[] CreateDhtSendNodesResponse(byte[] destinationPublicKey, List<DHTNode> nodes)
+        {
+            try
+            {
+                // Calcular tamaño del payload: [0x04] + [nodos*(public_key + ipport)]
+                int nodesCount = Math.Min(nodes.Count, 4); // Máximo 4 nodos como en toxcore
+                int payloadSize = 1 + (nodesCount * (CRYPTO_PUBLIC_KEY_SIZE + 18)); // 18 bytes por IPPort
+
+                byte[] payload = new byte[payloadSize];
+                payload[0] = 0x04; // SEND_NODES type
+
+                int offset = 1;
+                foreach (var node in nodes.Take(nodesCount))
+                {
+                    // Agregar public key del nodo (32 bytes)
+                    Buffer.BlockCopy(node.PublicKey, 0, payload, offset, CRYPTO_PUBLIC_KEY_SIZE);
+                    offset += CRYPTO_PUBLIC_KEY_SIZE;
+
+                    // Agregar IPPort (18 bytes)
+                    byte[] ippBytes = IPPortToBytes(node.EndPoint);
+                    Buffer.BlockCopy(ippBytes, 0, payload, offset, 18);
+                    offset += 18;
+                }
+
+                // Encriptar el payload
+                return CreateCryptopacket(payload, payload.Length, destinationPublicKey, SelfSecretKey);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando send_nodes response: {ex.Message}");
+                return null;
             }
         }
 
@@ -693,6 +1000,54 @@ namespace ToxCore.Core
 
 
         /// <summary>
+        /// HandleDecryptedSendNodesResponse - Maneja respuesta SEND_NODES encriptada
+        /// </summary>
+        private int HandleDecryptedSendNodesResponse(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
+        {
+            if (length < 1) return -1;
+
+            try
+            {
+                // El payload es: [0x04] + [nodos*(public_key + ipport)]
+                int nodesDataLength = length - 1;
+
+                // Cada nodo ocupa 50 bytes (32 + 18)
+                int nodeCount = nodesDataLength / 50;
+
+                int nodesAdded = 0;
+                for (int i = 0; i < nodeCount; i++)
+                {
+                    int offset = 1 + (i * 50);
+
+                    // Extraer public key del nodo (32 bytes)
+                    byte[] nodePublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                    Buffer.BlockCopy(packet, offset, nodePublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                    // Extraer IPPort (18 bytes)
+                    byte[] ippBytes = new byte[18];
+                    Buffer.BlockCopy(packet, offset + CRYPTO_PUBLIC_KEY_SIZE, ippBytes, 0, 18);
+
+                    IPPort nodeIPPort = BytesToIPPort(ippBytes);
+
+                    // Solo agregar nodos válidos
+                    if (nodeIPPort.Port > 0 && nodeIPPort.IP.Data != null)
+                    {
+                        AddNode(nodePublicKey, nodeIPPort);
+                        nodesAdded++;
+                    }
+                }
+
+                Logger.Log.DebugF($"[{LOG_TAG}] {nodesAdded} nodos agregados desde send_nodes de {source}");
+                return nodesAdded > 0 ? 0 : -1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleDecryptedSendNodesResponse: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
         /// DHT_send_packet - Compatible con C original
         /// </summary>
         public int DHT_send_packet(IPPort ipp, byte[] packet, int length)
@@ -735,6 +1090,37 @@ namespace ToxCore.Core
                 return -1;
             }
         }
+
+        /// <summary>
+        /// DHT_get_shared_key_recv - Como en DHT.c línea ~1200
+        /// Calcula la shared key para decryptar paquetes entrantes
+        /// </summary>
+        public int DHT_get_shared_key_recv(byte[] sharedKey, byte[] packet, byte[] secretKey)
+        {
+            try
+            {
+                if (sharedKey == null || packet == null || secretKey == null)
+                    return -1;
+
+                // Extraer la public key temporal del remitente (primeros 32 bytes)
+                byte[] tempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 0, tempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Calcular shared key usando crypto_box_beforenm
+                // shared_key = crypto_box_beforenm(temp_public_key, our_secret_key)
+                byte[] calculatedKey = CryptoBox.BeforeNm(tempPublicKey, secretKey);
+                if (calculatedKey == null) return -1;
+
+                Buffer.BlockCopy(calculatedKey, 0, sharedKey, 0, CRYPTO_SYMMETRIC_KEY_SIZE);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en DHT_get_shared_key_recv: {ex.Message}");
+                return -1;
+            }
+        }
+
 
         // ==================== FUNCIONES DE GESTIÓN DE NODOS ====================
 
@@ -1388,57 +1774,73 @@ namespace ToxCore.Core
         // ==================== FUNCIONES AUXILIARES ====================
 
         /// <summary>
-        /// Convertir IPPort a bytes - IMPLEMENTACIÓN REAL
+        /// IPPortToBytes - Convierte IPPort a array de bytes (18 bytes)
         /// </summary>
         private byte[] IPPortToBytes(IPPort ipp)
         {
             byte[] result = new byte[18];
+
+            // IP (16 bytes)
             if (ipp.IP.Data != null)
             {
                 Buffer.BlockCopy(ipp.IP.Data, 0, result, 0, 16);
             }
+
+            // Puerto (2 bytes - big endian)
             result[16] = (byte)((ipp.Port >> 8) & 0xFF);
             result[17] = (byte)(ipp.Port & 0xFF);
+
             return result;
         }
 
+        /// <summary>
+        /// BytesToIPPort - Convierte array de bytes a IPPort
+        /// </summary>
         private IPPort BytesToIPPort(byte[] data)
         {
-            if (data.Length < 18) return new IPPort();
+            if (data == null || data.Length < 18)
+                return new IPPort();
 
-            // IP (primeros 16 bytes)
-            byte[] ipData = new byte[16];
-            Buffer.BlockCopy(data, 0, ipData, 0, 16);
-
-            // Puerto (últimos 2 bytes)
-            ushort port = (ushort)((data[16] << 8) | data[17]);
-
-            // Determinar si es IPv4 o IPv6
-            IP ip = new IP();
-            bool isIPv4 = true;
-            for (int i = 0; i < 10; i++)
+            try
             {
-                if (ipData[i] != 0)
+                // IP (primeros 16 bytes)
+                byte[] ipData = new byte[16];
+                Buffer.BlockCopy(data, 0, ipData, 0, 16);
+
+                // Puerto (últimos 2 bytes - big endian)
+                ushort port = (ushort)((data[16] << 8) | data[17]);
+
+                // Determinar si es IPv4 o IPv6
+                bool isIPv4 = true;
+                for (int i = 0; i < 10; i++)
                 {
-                    isIPv4 = false;
-                    break;
+                    if (ipData[i] != 0)
+                    {
+                        isIPv4 = false;
+                        break;
+                    }
                 }
-            }
 
-            if (isIPv4 && ipData[10] == 0xFF && ipData[11] == 0xFF)
-            {
-                // IPv4 mapeado a IPv6
-                byte[] ip4Bytes = new byte[4];
-                Buffer.BlockCopy(ipData, 12, ip4Bytes, 0, 4);
-                ip = new IP(new IP4(ip4Bytes));
-            }
-            else
-            {
-                // IPv6 nativo
-                ip = new IP(new IP6(ipData));
-            }
+                IP ip;
+                if (isIPv4 && ipData[10] == 0xFF && ipData[11] == 0xFF)
+                {
+                    // IPv4 mapeado a IPv6
+                    byte[] ip4Bytes = new byte[4];
+                    Buffer.BlockCopy(ipData, 12, ip4Bytes, 0, 4);
+                    ip = new IP(new IP4(ip4Bytes));
+                }
+                else
+                {
+                    // IPv6 nativo
+                    ip = new IP(new IP6(ipData));
+                }
 
-            return new IPPort(ip, port);
+                return new IPPort(ip, port);
+            }
+            catch (Exception)
+            {
+                return new IPPort();
+            }
         }
 
         // ==================== FUNCIONES DE MANTENIMIENTO ====================

@@ -1,6 +1,7 @@
 ﻿using System;
-using System.Linq;
 using System.Collections.Generic;
+using System.Linq;
+using ToxCore.FileTransfer;
 
 namespace ToxCore.Core
 {
@@ -15,6 +16,7 @@ namespace ToxCore.Core
         private Messenger _messenger;
         private ToxOptions _options;
         private bool _isRunning;
+
 
         // Callbacks de la API pública (equivalente a tox.h callbacks)
         public delegate void FriendRequestCallback(Tox tox, byte[] publicKey, string message, object userData);
@@ -69,22 +71,117 @@ namespace ToxCore.Core
 
             try
             {
-                // La dirección Tox es: public_key (32) + nospam (4) + checksum (2)
                 byte[] publicKey = _messenger.State.User.PublicKey;
                 byte[] nospam = _messenger.State.User.Nospam ?? new byte[4];
 
-                // Combinar public_key + nospam
-                byte[] address = new byte[TOX_PUBLIC_KEY_SIZE + TOX_NOSPAM_SIZE];
-                Buffer.BlockCopy(publicKey, 0, address, 0, TOX_PUBLIC_KEY_SIZE);
-                Buffer.BlockCopy(nospam, 0, address, TOX_PUBLIC_KEY_SIZE, TOX_NOSPAM_SIZE);
+                // 1. Primero crear address sin checksum: public_key (32) + nospam (4)
+                byte[] addressWithoutChecksum = new byte[TOX_PUBLIC_KEY_SIZE + TOX_NOSPAM_SIZE];
+                Buffer.BlockCopy(publicKey, 0, addressWithoutChecksum, 0, TOX_PUBLIC_KEY_SIZE);
+                Buffer.BlockCopy(nospam, 0, addressWithoutChecksum, TOX_PUBLIC_KEY_SIZE, TOX_NOSPAM_SIZE);
 
-                // Convertir a hexadecimal
-                return BitConverter.ToString(address).Replace("-", "").ToUpper();
+                // 2. Calcular checksum (2 bytes) como en toxcore - crypto_sha256
+                byte[] checksum = CalculateToxAddressChecksum(addressWithoutChecksum);
+
+                // 3. Combinar todo: public_key (32) + nospam (4) + checksum (2) = 38 bytes
+                byte[] fullAddress = new byte[TOX_ADDRESS_SIZE];
+                Buffer.BlockCopy(addressWithoutChecksum, 0, fullAddress, 0, addressWithoutChecksum.Length);
+                Buffer.BlockCopy(checksum, 0, fullAddress, addressWithoutChecksum.Length, 2);
+
+                // Convertir a hexadecimal (76 caracteres)
+                return BitConverter.ToString(fullAddress).Replace("-", "").ToUpper();
             }
             catch (Exception ex)
             {
                 Logger.Log.ErrorF($"[{LOG_TAG}] Error obteniendo address: {ex.Message}");
                 return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// CalculateToxAddressChecksum - Como en toxcore (basado en SHA256)
+        /// </summary>
+        private byte[] CalculateToxAddressChecksum(byte[] addressWithoutChecksum)
+        {
+            try
+            {
+                // En toxcore, el checksum son los primeros 2 bytes del SHA256 hash
+                using (var sha256 = System.Security.Cryptography.SHA256.Create())
+                {
+                    byte[] hash = sha256.ComputeHash(addressWithoutChecksum);
+
+                    // Tomar primeros 2 bytes del hash como checksum
+                    byte[] checksum = new byte[2];
+                    Buffer.BlockCopy(hash, 0, checksum, 0, 2);
+
+                    return checksum;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error calculando checksum: {ex.Message}");
+                return new byte[2]; // Checksum por defecto (ceros)
+            }
+        }
+
+
+        /// <summary>
+        /// ValidateToxAddress - Verifica que un ID Tox sea válido (checksum correcto)
+        /// </summary>
+        public bool ValidateToxAddress(string toxAddress)
+        {
+            if (string.IsNullOrEmpty(toxAddress) || toxAddress.Length != 76) // 38 bytes * 2 caracteres hex
+                return false;
+
+            try
+            {
+                // Convertir hex string a bytes
+                byte[] addressBytes = HexStringToByteArray(toxAddress);
+                if (addressBytes.Length != TOX_ADDRESS_SIZE)
+                    return false;
+
+                // Separar components
+                byte[] addressWithoutChecksum = new byte[TOX_PUBLIC_KEY_SIZE + TOX_NOSPAM_SIZE];
+                byte[] receivedChecksum = new byte[2];
+
+                Buffer.BlockCopy(addressBytes, 0, addressWithoutChecksum, 0, addressWithoutChecksum.Length);
+                Buffer.BlockCopy(addressBytes, addressWithoutChecksum.Length, receivedChecksum, 0, 2);
+
+                // Calcular checksum esperado
+                byte[] calculatedChecksum = CalculateToxAddressChecksum(addressWithoutChecksum);
+
+                // ✅ CORREGIDO: Comparar manualmente los 2 bytes del checksum
+                return receivedChecksum[0] == calculatedChecksum[0] &&
+                       receivedChecksum[1] == calculatedChecksum[1];
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error validando address: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// HexStringToByteArray - Convierte string hexadecimal a byte[] (robusto)
+        /// </summary>
+        private static byte[] HexStringToByteArray(string hex)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(hex) || hex.Length % 2 != 0)
+                    return null;
+
+                byte[] bytes = new byte[hex.Length / 2];
+                for (int i = 0; i < hex.Length; i += 2)
+                {
+                    string hexByte = hex.Substring(i, 2);
+                    bytes[i / 2] = Convert.ToByte(hexByte, 16);
+                }
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[TOX] Error convirtiendo hex a bytes: {ex.Message}");
+                return null;
             }
         }
 
@@ -185,7 +282,7 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// tox_friend_add - Agregar amigo por dirección Tox
+        /// tox_friend_add - ACTUALIZADO para validar formato de address
         /// </summary>
         public int tox_friend_add(byte[] address, string message)
         {
@@ -195,17 +292,39 @@ namespace ToxCore.Core
                 return -1;
             }
 
-            if (address == null || address.Length < TOX_PUBLIC_KEY_SIZE)
+            // Convertir address bytes a string hex para validación
+            string addressHex = BitConverter.ToString(address).Replace("-", "").ToUpper();
+
+            if (!ValidateToxAddress(addressHex))
             {
-                Logger.Log.Error($"[{LOG_TAG}] Dirección Tox inválida");
+                Logger.Log.Error($"[{LOG_TAG}] Dirección Tox inválida - checksum incorrecto");
                 return -1;
             }
 
-            // Extraer clave pública de la dirección (primeros 32 bytes)
-            byte[] publicKey = new byte[TOX_PUBLIC_KEY_SIZE];
-            Buffer.BlockCopy(address, 0, publicKey, 0, TOX_PUBLIC_KEY_SIZE);
+            if (address.Length < TOX_PUBLIC_KEY_SIZE)
+            {
+                Logger.Log.Error($"[{LOG_TAG}] Dirección Tox inválida - muy corta");
+                return -1;
+            }
 
-            return _messenger.AddFriend(publicKey, message);
+            // Extraer clave pública (primeros 32 bytes del address)
+            byte[] publicKey = new byte[TOX_PUBLIC_KEY_SIZE];
+            Array.Copy(address, publicKey, TOX_PUBLIC_KEY_SIZE);
+
+            Logger.Log.InfoF($"[{LOG_TAG}] Agregando amigo - Mensaje: {message}");
+
+            int friendNumber = _messenger.AddFriend(publicKey, message);
+
+            if (friendNumber >= 0)
+            {
+                Logger.Log.InfoF($"[{LOG_TAG}] Amigo agregado: {friendNumber}");
+            }
+            else
+            {
+                Logger.Log.Warning($"[{LOG_TAG}] Falló agregar amigo");
+            }
+
+            return friendNumber;
         }
 
         /// <summary>
@@ -442,6 +561,28 @@ namespace ToxCore.Core
         {
             OnFriendConnectionStatus?.Invoke(this, friendNumber, status, null);
         }
+
+        public int FileSend(int friendNumber, FileKind kind, long fileSize, string fileName, byte[] fileId = null)
+        {
+            return _messenger?.FileTransfer?.FileSend(friendNumber, kind, fileSize, fileName, fileId) ?? -1;
+        }
+
+        public bool FileSendChunk(int friendNumber, int fileNumber, long position, byte[] data, int length)
+        {
+            return _messenger?.FileTransfer?.FileSendChunk(friendNumber, fileNumber, position, data, length) ?? false;
+        }
+
+        public bool FileControl(int friendNumber, int fileNumber, int control)
+        {
+            return _messenger?.FileTransfer?.FileControl(friendNumber, fileNumber, control) ?? false;
+        }
+
+        // Callbacks para archivos
+        public event FileTransferCallbacks.FileReceiveCallback OnFileReceive;
+        public event FileTransferCallbacks.FileChunkRequestCallback OnFileChunkRequest;
+        public event FileTransferCallbacks.FileChunkReceivedCallback OnFileChunkReceived;
+        public event FileTransferCallbacks.FileTransferStatusChangedCallback OnFileTransferStatusChanged;
+
 
         public void Dispose()
         {

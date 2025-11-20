@@ -51,6 +51,8 @@ namespace ToxCore.Core
     /// </summary>
     public class TCP_Client
     {
+        private const string LOG_TAG = "TCP_Client";
+
         public const int TCP_PACKET_MAX_SIZE = 2048;
         public const int TCP_HANDSHAKE_TIMEOUT = 10000;
         public const int TCP_CONNECTION_TIMEOUT = 30000;
@@ -244,13 +246,13 @@ namespace ToxCore.Core
         {
             try
             {
-                // Enviar handshake inicial
-                byte[] handshake = CreateHandshakePacket();
+                // Enviar handshake inicial - pasar public_key
+                byte[] handshake = CreateHandshakePacket(public_key); // ← Agregar parámetro
                 int sent = Connection.Socket.Send(handshake);
 
                 if (sent > 0)
                 {
-                    // CORREGIDO: Crear nueva instancia con estado actualizado
+                    // Actualizar estado
                     Connection = new TCP_Connection(
                         Connection.Socket,
                         Connection.RemoteEndPoint,
@@ -338,23 +340,36 @@ namespace ToxCore.Core
             }
         }
 
-        private byte[] CreateHandshakePacket()
+        private byte[] CreateHandshakePacket(byte[] public_key) // ← Agregar parámetro public_key
         {
-            // Paquete de handshake simplificado
-            byte[] packet = new byte[64];
+            try
+            {
+                // Basado en TCP_client.c - send_tcp_handshake
+                byte[] packet = new byte[CryptoBox.CRYPTO_PUBLIC_KEY_SIZE + CryptoBox.CRYPTO_NONCE_SIZE + CryptoBox.CRYPTO_MAC_SIZE];
 
-            // Clave pública (32 bytes)
-            Buffer.BlockCopy(SelfPublicKey, 0, packet, 0, 32);
+                // 1. Nuestra clave pública
+                Buffer.BlockCopy(SelfPublicKey, 0, packet, 0, CryptoBox.CRYPTO_PUBLIC_KEY_SIZE);
 
-            // Nonce (24 bytes)
-            byte[] nonce = RandomBytes.Generate(24);
-            Buffer.BlockCopy(nonce, 0, packet, 32, 24);
+                // 2. Nonce aleatorio
+                byte[] nonce = RandomBytes.Generate(CryptoBox.CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(nonce, 0, packet, CryptoBox.CRYPTO_PUBLIC_KEY_SIZE, CryptoBox.CRYPTO_NONCE_SIZE);
 
-            // Timestamp (8 bytes)
-            byte[] timestamp = BitConverter.GetBytes(DateTime.UtcNow.Ticks);
-            Buffer.BlockCopy(timestamp, 0, packet, 56, 8);
+                // 3. Encriptar con la clave pública del destino
+                byte[] temp = new byte[CryptoBox.CRYPTO_PUBLIC_KEY_SIZE + CryptoBox.CRYPTO_NONCE_SIZE];
+                Buffer.BlockCopy(SelfPublicKey, 0, temp, 0, CryptoBox.CRYPTO_PUBLIC_KEY_SIZE);
+                Buffer.BlockCopy(nonce, 0, temp, CryptoBox.CRYPTO_PUBLIC_KEY_SIZE, CryptoBox.CRYPTO_NONCE_SIZE);
 
-            return packet;
+                byte[] encrypted = CryptoBox.Encrypt(temp, nonce, public_key, SelfSecretKey);
+                if (encrypted == null) return null;
+
+                // 4. El paquete final es la data encriptada
+                return encrypted;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando handshake TCP: {ex.Message}");
+                return null;
+            }
         }
 
         /// <summary>
