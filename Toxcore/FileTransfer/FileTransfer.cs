@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Threading;
-using ToxCore.Core;
+﻿using ToxCore.Core;
 
 namespace ToxCore.FileTransfer
 {
@@ -64,10 +60,17 @@ namespace ToxCore.FileTransfer
     /// </summary>
     public class FileTransferCallbacks
     {
-        public Action<int, int, FileKind, long, string, byte[], object> OnFileReceive;
-        public Action<int, int, long, object> OnFileChunkRequest;
-        public Action<int, int, long, byte[], object> OnFileChunkReceived;
-        public Action<int, int, FileTransferStatus, object> OnFileTransferStatusChanged;
+        // ✅ DEFINICIÓN CORRECTA DE LOS DELEGADOS
+        public delegate void FileReceiveCallback(int friendNumber, int fileNumber, FileKind kind, long fileSize, string fileName, byte[] fileId, object userData);
+        public delegate void FileChunkRequestCallback(int friendNumber, int fileNumber, long position, object userData);
+        public delegate void FileChunkReceivedCallback(int friendNumber, int fileNumber, long position, byte[] data, object userData);
+        public delegate void FileTransferStatusChangedCallback(int friendNumber, int fileNumber, FileTransferStatus status, object userData);
+
+        // ✅ EVENTOS CORRECTAMENTE TIPADOS
+        public FileReceiveCallback OnFileReceive { get; set; }
+        public FileChunkRequestCallback OnFileChunkRequest { get; set; }
+        public FileChunkReceivedCallback OnFileChunkReceived { get; set; }
+        public FileTransferStatusChangedCallback OnFileTransferStatusChanged { get; set; }
     }
 
     /// <summary>
@@ -100,7 +103,9 @@ namespace ToxCore.FileTransfer
         {
             try
             {
-                if (!_messenger.FriendConn.Get_friend(friendNumber).HasValue)
+                // ✅ CORRECCIÓN: Friend es una clase, no un nullable - usar null check
+                var friend = _messenger.FriendConn.Get_friend(friendNumber);
+                if (friend == null)
                 {
                     Logger.Log.ErrorF($"[{LOG_TAG}] Friend {friendNumber} no encontrado");
                     return -1;
@@ -111,7 +116,7 @@ namespace ToxCore.FileTransfer
                 {
                     Kind = kind,
                     FileSize = fileSize,
-                    FileName = fileName,
+                    FileName = fileName ?? "unknown_file",
                     Status = FileTransferStatus.FILE_TRANSFER_STATUS_TRANSFERRING
                 };
 
@@ -177,9 +182,9 @@ namespace ToxCore.FileTransfer
 
                 // Enviar a través de onion routing
                 var friend = _messenger.FriendConn.Get_friend(friendNumber);
-                if (!friend.HasValue) return false;
+                if (friend == null) return false;
 
-                int sent = _messenger.Onion.onion_send_1(packet, packet.Length, friend.Value.PublicKey);
+                int sent = _messenger.Onion.onion_send_1(packet, packet.Length, friend.PublicKey);
                 if (sent > 0)
                 {
                     transfer.BytesSent += length;
@@ -389,9 +394,9 @@ namespace ToxCore.FileTransfer
                 Buffer.BlockCopy(BitConverter.GetBytes(control), 0, packet, 5, 4);
 
                 var friend = _messenger.FriendConn.Get_friend(friendNumber);
-                if (friend.HasValue)
+                if (friend != null)
                 {
-                    _messenger.Onion.onion_send_1(packet, packet.Length, friend.Value.PublicKey);
+                    _messenger.Onion.onion_send_1(packet, packet.Length, friend.PublicKey);
                 }
             }
             catch (Exception ex)
@@ -444,6 +449,4 @@ namespace ToxCore.FileTransfer
             }
         }
     }
-
-
 }
