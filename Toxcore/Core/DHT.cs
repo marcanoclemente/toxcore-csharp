@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Net;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace ToxCore.Core
 {
@@ -1129,7 +1126,7 @@ namespace ToxCore.Core
         /// </summary>
         public int AddNode(byte[] publicKey, IPPort endPoint)
         {
-            if (publicKey == null || publicKey.Length != CRYPTO_PUBLIC_KEY_SIZE)
+            if (publicKey == null || publicKey.Length != 32)
                 return -1;
 
             try
@@ -1138,10 +1135,15 @@ namespace ToxCore.Core
 
                 lock (_nodesLock)
                 {
-                    if (_nodesByKey.ContainsKey(keyString))
+                    // Buscar nodo existente
+                    var existingNode = _nodes.Find(n =>
+                        n != null &&
+                        n.PublicKey != null &&
+                        ByteArraysEqual(publicKey, n.PublicKey));
+
+                    if (existingNode != null)
                     {
                         // Actualizar nodo existente
-                        var existingNode = _nodesByKey[keyString];
                         existingNode.EndPoint = endPoint;
                         existingNode.LastSeen = DateTime.UtcNow.Ticks;
                         existingNode.IsActive = true;

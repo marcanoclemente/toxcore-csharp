@@ -1,8 +1,5 @@
 ﻿using Sodium;
-using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using ToxCore.Core;
 
 namespace ToxCore.Core
 {
@@ -458,15 +455,15 @@ namespace ToxCore.Core
             {
                 lock (_friendsLock)
                 {
-                    var friend = _friends.Find(f => f.FriendNumber == friend_number);
-                    if (friend.PublicKey == null || !friend.IsOnline)
+                    var friend = FindFriendByNumber(friend_number);
+                    if (friend?.PublicKey == null || !friend.IsOnline)
                     {
                         Logger.Log.WarningF($"[{LOG_TAG}] Amigo {friend_number} no disponible para envío");
                         return -1;
                     }
 
-                    // Crear paquete de mensaje ENCRIPTADO - pasar friend_number
-                    byte[] packet = CreateMessagePacket(message, length, friend_number); // ← Agregar parámetro
+                    // Crear paquete de mensaje ENCRIPTADO
+                    byte[] packet = CreateMessagePacket(message, length, friend_number);
                     if (packet == null) return -1;
 
                     // Enviar a través de Onion Routing
@@ -488,6 +485,8 @@ namespace ToxCore.Core
                 return -1;
             }
         }
+
+
 
         /// <summary>
         /// m_set_status - Establecer estado de usuario
@@ -1016,6 +1015,15 @@ namespace ToxCore.Core
                 return friend.PublicKey != null ? friend.FriendNumber : -1;
             }
         }
+
+        private Friend? FindFriendByNumber(int friendNumber)
+        {
+            lock (_friendsLock)
+            {
+                return _friends.Find(f => f.FriendNumber == friendNumber);
+            }
+        }
+
 
         /// <summary>
         /// ProcessDecryptedFriendPacket - Procesa paquetes decryptados de amigos

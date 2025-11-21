@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Net;
-using System.Runtime.InteropServices;
-
+﻿
 namespace ToxCore.Core
 {
     /// <summary>

@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
+﻿using System.Net;
 using ToxCore.FileTransfer;
 
 namespace ToxCore.Core
@@ -63,8 +60,9 @@ namespace ToxCore.Core
         public FriendConnection FriendConn { get; private set; }
         public ToxState State { get; private set; }
         public LANDiscovery LANDiscovery { get; private set; }
-
         public FileTransferManager FileTransfer { get; private set; }
+        public TCPTunnel TcpTunnel { get; private set; }
+        public TCPForwarding TcpForwarding { get; private set; }
 
         // Configuración
         private readonly MessengerOptions _options;
@@ -74,6 +72,8 @@ namespace ToxCore.Core
         {
             _options = options ?? new MessengerOptions();
             State = new ToxState();
+            TcpTunnel = new TCPTunnel(this);
+            TcpForwarding = new TCPForwarding(TcpTunnel);
             _isRunning = false;
 
             Logger.Log.Info($"[{LOG_TAG}] Messenger inicializando...");
@@ -137,6 +137,8 @@ namespace ToxCore.Core
 
                 FileTransfer = new FileTransferManager(this);
 
+                TcpTunnel.Start();
+
                 _isRunning = true;
                 Logger.Log.Info($"[{LOG_TAG}] Messenger iniciado correctamente");
                 return true;
@@ -146,6 +148,11 @@ namespace ToxCore.Core
                 Logger.Log.ErrorF($"[{LOG_TAG}] Error iniciando messenger: {ex.Message}");
                 return false;
             }
+        }
+
+        private int HandleTunnelPacket(int friendcon_id, byte[] data, int length)
+        {
+            return TcpTunnel?.HandleTunnelPacket(friendcon_id, data, length) ?? -1;
         }
 
         /// <summary>
@@ -169,6 +176,7 @@ namespace ToxCore.Core
                 LANDiscovery?.Dispose();
                 GroupManager?.Stop();
                 GroupManager?.Dispose();
+                TcpTunnel?.Stop();
                 Logger.Log.Info($"[{LOG_TAG}] Messenger detenido");
             }
             catch (Exception ex)

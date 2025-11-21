@@ -1,5 +1,4 @@
-﻿using System;
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using Sodium;
 
 namespace ToxCore.Core
@@ -27,14 +26,13 @@ namespace ToxCore.Core
 
             try
             {
-                // CORRECCIÓN: Sodium.Core 1.4.0 tiene sobrecarga que acepta byte[] para password y salt
-                // pero los parámetros deben ser del tipo correcto
+                // CORRECCIÓN: Sodium.Core 1.4.0 
                 return PasswordHash.ScryptHashBinary(
-                    password: password,        // byte[] 
-                    salt: salt,               // byte[] - debe ser exactamente 32 bytes
-                    opsLimit: (long)opsLimit, // long
-                    memLimit: (int)memLimit,  // int
-                    outputLength: HASH_BYTES  // long
+                    password: password,         
+                    salt: salt,               
+                    opsLimit: (long)opsLimit, 
+                    memLimit: (int)memLimit, 
+                    outputLength: (long)HASH_BYTES  
                 );
             }
             catch (Exception ex)

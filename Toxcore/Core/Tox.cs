@@ -1,7 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+﻿using ToxCore.AV;
 using ToxCore.FileTransfer;
+using ToxCore.Networking;
 
 namespace ToxCore.Core
 {
@@ -38,6 +37,13 @@ namespace ToxCore.Core
         public event FriendReadReceiptCallback OnFriendReadReceipt;
         public event SelfConnectionStatusCallback OnSelfConnectionStatus;
 
+
+        // Callbacks para archivos
+        public event FileTransferCallbacks.FileReceiveCallback OnFileReceive;
+        public event FileTransferCallbacks.FileChunkRequestCallback OnFileChunkRequest;
+        public event FileTransferCallbacks.FileChunkReceivedCallback OnFileChunkReceived;
+        public event FileTransferCallbacks.FileTransferStatusChangedCallback OnFileTransferStatusChanged;
+
         // Constantes de la API pública (de tox.h)
         public const int TOX_ADDRESS_SIZE = 38;
         public const int TOX_PUBLIC_KEY_SIZE = 32;
@@ -48,10 +54,21 @@ namespace ToxCore.Core
         public const int TOX_MAX_FRIEND_REQUEST_LENGTH = 1016;
         public const int TOX_MAX_MESSAGE_LENGTH = 1372;
 
+        private ToxAv _toxAv;
+        public ToxAv Av => _toxAv;
+
+        private AdvancedNetworking _advancedNetworking;
+        public AdvancedNetworking AdvancedNetworking => _advancedNetworking;
+
+
         public Tox(ToxOptions options = null)
         {
             _options = options ?? new ToxOptions();
             _isRunning = false;
+            
+            _advancedNetworking = new AdvancedNetworking(this);
+
+            _toxAv = new ToxAv(this);
 
             Logger.Log.Info($"[{LOG_TAG}] Cliente Tox inicializado");
         }
@@ -492,6 +509,9 @@ namespace ToxCore.Core
 
                 _messenger = new Messenger(messengerOptions);
 
+                _advancedNetworking.Start();
+                _toxAv.Start();
+
                 // Configurar LAN Discovery si está habilitado
                 if (_options.EnableLANDiscovery && _messenger.LANDiscovery != null)
                 {
@@ -502,6 +522,7 @@ namespace ToxCore.Core
                         // tox_friend_add_norequest(peer.PublicKey);
                     };
                 }
+
 
                 bool started = _messenger.Start();
 
@@ -531,6 +552,9 @@ namespace ToxCore.Core
             {
                 _messenger?.Stop();
                 _isRunning = false;
+                _advancedNetworking?.Stop();
+                _toxAv?.Stop();
+
                 Logger.Log.Info($"[{LOG_TAG}] Cliente Tox detenido");
             }
             catch (Exception ex)
@@ -577,17 +601,15 @@ namespace ToxCore.Core
             return _messenger?.FileTransfer?.FileControl(friendNumber, fileNumber, control) ?? false;
         }
 
-        // Callbacks para archivos
-        public event FileTransferCallbacks.FileReceiveCallback OnFileReceive;
-        public event FileTransferCallbacks.FileChunkRequestCallback OnFileChunkRequest;
-        public event FileTransferCallbacks.FileChunkReceivedCallback OnFileChunkReceived;
-        public event FileTransferCallbacks.FileTransferStatusChangedCallback OnFileTransferStatusChanged;
+        
 
 
         public void Dispose()
         {
             Stop();
             _messenger?.Dispose();
+            _advancedNetworking?.Dispose();
+            _toxAv?.Dispose();
         }
     }
 
