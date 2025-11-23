@@ -1,5 +1,6 @@
 ﻿using System.Net;
 using ToxCore.FileTransfer;
+using ToxCore.Networking;
 
 namespace ToxCore.Core
 {
@@ -24,6 +25,11 @@ namespace ToxCore.Core
             new BootstrapNode("tox.novg.net", 33445, "D527E5847F8330D628DAB1814F0A422F6DC9D0A300E6C357634EE2DA88C35463"),
             new BootstrapNode("tox.kurnevsky.net", 33445, "82EF82BA33445A1F91A7DB27189ECFC0C013E06E3DA71F588ED692BED625EC23")
         };
+
+        private string _stateFilePath;
+        public AdvancedNetworking AdvancedNetworking { get; private set; }
+
+        private Messenger _messenger;
 
         private int _currentBootstrapIndex = 0;
         private long _lastBootstrapAttempt = 0;
@@ -74,6 +80,7 @@ namespace ToxCore.Core
             State = new ToxState();
             TcpTunnel = new TCPTunnel(this);
             TcpForwarding = new TCPForwarding(TcpTunnel);
+            Onion = new Onion(State.User.PublicKey, State.User.SecretKey, null!, this);
             _isRunning = false;
 
             Logger.Log.Info($"[{LOG_TAG}] Messenger inicializando...");
@@ -103,7 +110,7 @@ namespace ToxCore.Core
                 Dht = new DHT(State.User.PublicKey, State.User.SecretKey);
 
                 // 3. Inicializar Onion
-                Onion = new Onion(State.User.PublicKey, State.User.SecretKey);
+                Onion = new Onion(State.User.PublicKey, State.User.SecretKey, Dht, this);
 
                 // 4. Inicializar TCP Server si está habilitado (usar constructor sin parámetros)
                 if (_options.TcpEnabled)
@@ -130,7 +137,7 @@ namespace ToxCore.Core
                 }
 
                 GroupManager = new GroupManager(this);
-                GroupManager.Start();
+                GroupManager?.Start();
 
                 Logger.Log.Info($"[{LOG_TAG}] Group Manager iniciado");
 
@@ -139,6 +146,7 @@ namespace ToxCore.Core
 
                 TcpTunnel.Start();
 
+                
                 _isRunning = true;
                 Logger.Log.Info($"[{LOG_TAG}] Messenger iniciado correctamente");
                 return true;
@@ -184,6 +192,61 @@ namespace ToxCore.Core
                 Logger.Log.ErrorF($"[{LOG_TAG}] Error deteniendo messenger: {ex.Message}");
             }
         }
+
+        public void TriggerOnionFriendMessage(int friendNumber, byte[] message)
+        {
+            FriendConn?.HandleFriendPacket(message, message.Length, GetFriendPublicKey(friendNumber));
+        }
+
+        private byte[] GetFriendPublicKey(int friendNumber)
+        {
+            return State.Friends.Friends.FirstOrDefault(f => f.FriendNumber == friendNumber)?.PublicKey;
+        }
+
+        /// <summary>
+        /// Establece la ruta del archivo de estado y carga si existe
+        /// </summary>
+        public bool LoadState(string filePath)
+        {
+            _stateFilePath = filePath;
+            if (State.LoadFromFile(filePath))
+            {
+                Logger.Log.InfoF($"[MESSENGER] Estado cargado desde {filePath}");
+                return true;
+            }
+            Logger.Log.WarningF($"[MESSENGER] No se pudo cargar estado desde {filePath}, iniciando nuevo");
+            return false;
+        }
+
+        /// <summary>
+        /// Guarda el estado actual si hay ruta configurada
+        /// </summary>
+        public bool SaveState()
+        {
+            if (string.IsNullOrEmpty(_stateFilePath)) return false;
+
+            // ✅ Usa el campo real que ya existe
+            State.Runtime.KnownDHTNodes = Dht?.GetClosestNodes(_messenger.State.User.PublicKey, 200) ?? new List<DHT.DHTNode>();
+
+            // ✅ Usa reflexión para FileTransfer
+            var xferList = FileTransfer?.GetType()
+                .GetMethod("GetActiveTransfers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                ?.Invoke(FileTransfer, null) as System.Collections.IEnumerable;
+
+            State.Runtime.ActiveFileTransfers = xferList?.Cast<EnhancedFileTransfer>().ToList() ?? new List<EnhancedFileTransfer>();
+
+            // ✅ LanDiscovery
+            State.Runtime.LanPeers = LANDiscovery?.GetDiscoveredPeers() ?? new List<DiscoveredPeer>();
+
+            // ✅ Onion
+            State.Runtime.OnionPaths = Onion?._onionPaths ?? new List<OnionPath>();
+
+            // ✅ TCPTunnel
+            State.Runtime.TcpTunnels = TcpTunnel != null ? TcpTunnel._connections.Values.ToList() : new List<TCPTunnelConnection>();
+
+            return State.SaveToFile(_stateFilePath);
+        }
+
 
         private void OnPeerDiscovered(DiscoveredPeer peer)
         {

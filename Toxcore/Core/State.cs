@@ -1,4 +1,6 @@
 ﻿using System.Text;
+using ToxCore.FileTransfer;
+using static ToxCore.Core.DHT;
 
 namespace ToxCore.Core
 {
@@ -15,6 +17,7 @@ namespace ToxCore.Core
         public ToxUser User { get; private set; }
         public ToxFriends Friends { get; private set; }
         public ToxConferences Conferences { get; private set; }
+        public ToxRuntimeState Runtime { get; private set; } = new();
 
         public ToxState()
         {
@@ -27,6 +30,7 @@ namespace ToxCore.Core
             Logger.Log.Info($"[{LOG_TAG}] Estado inicializado");
         }
 
+        
         /// <summary>
         /// tox_state_load - Cargar estado desde bytes (equivalente a state_load)
         /// </summary>
@@ -43,25 +47,16 @@ namespace ToxCore.Core
                 using var stream = new MemoryStream(data);
                 using var reader = new BinaryReader(stream);
 
-                // Verificar magic number (similar al original)
                 uint magic = reader.ReadUInt32();
-                if (magic != 0x01546F78) // "Tox\0x01" en little-endian
-                {
-                    Logger.Log.Error($"[{LOG_TAG}] Magic number inválido: 0x{magic:X8}");
-                    return false;
-                }
+                if (magic != 0x01546F78) return false;
 
-                // Cargar usuario
                 User = ToxUser.Load(reader);
-
-                // Cargar amigos
                 Friends = ToxFriends.Load(reader);
+                Conferences = ToxConferences.Load(reader);
 
-                // Cargar conferencias (si existen)
+                // ✅ Cargar runtime si existe
                 if (stream.Position < stream.Length)
-                {
-                    Conferences = ToxConferences.Load(reader);
-                }
+                    Runtime = ToxRuntimeState.Load(reader);
 
                 _stateData = data;
                 _modified = false;
@@ -86,21 +81,17 @@ namespace ToxCore.Core
                 using var stream = new MemoryStream();
                 using var writer = new BinaryWriter(stream);
 
-                // Escribir magic number
-                writer.Write(0x01546F78); // "Tox\0x01"
+                writer.Write(0x01546F78); // Magic
 
-                // Guardar usuario
                 User.Save(writer);
-
-                // Guardar amigos
                 Friends.Save(writer);
-
-                // Guardar conferencias
                 Conferences.Save(writer);
+
+                // ✅ Guardar runtime
+                Runtime.Save(writer);
 
                 _stateData = stream.ToArray();
                 _modified = false;
-
                 Logger.Log.Info($"[{LOG_TAG}] Estado guardado - Tamaño: {_stateData.Length} bytes");
                 return _stateData;
             }
@@ -204,6 +195,74 @@ namespace ToxCore.Core
             _stateData = null;
         }
     }
+
+    /// <summary>
+    /// Estado extendido para guardar más datos de runtime
+    /// </summary>
+    public class ToxRuntimeState
+    {
+        public List<DHTNode> KnownDHTNodes { get; set; } = new();
+        public List<EnhancedFileTransfer> ActiveFileTransfers { get; set; } = new();
+        public List<DiscoveredPeer> LanPeers { get; set; } = new();
+        public List<OnionPath> OnionPaths { get; set; } = new();
+        public List<TCPTunnelConnection> TcpTunnels { get; set; } = new();
+        public List<ToxGroupState> ActiveGroups { get; set; } = new();
+
+        public static ToxRuntimeState Load(BinaryReader reader)
+        {
+            var state = new ToxRuntimeState();
+            try
+            {
+                int dhtCount = reader.ReadInt32();
+                for (int i = 0; i < dhtCount; i++)
+                {
+                    var node = new DHTNode(reader.ReadBytes(32), new IPPort());
+                    node.LastSeen = reader.ReadInt64();
+                    state.KnownDHTNodes.Add(node);
+                }
+
+                int xferCount = reader.ReadInt32();
+                for (int i = 0; i < xferCount; i++)
+                {
+                    var xfer = new EnhancedFileTransfer(reader.ReadInt32(), reader.ReadInt32());
+                    xfer.FileName = reader.ReadString();
+                    xfer.FileSize = reader.ReadInt64();
+                    xfer.BytesReceived = reader.ReadInt64();
+                    xfer.Status = (EnhancedFileTransferStatus)reader.ReadByte();
+                    xfer.FileHash = reader.ReadBytes(32);
+                    state.ActiveFileTransfers.Add(xfer);
+                }
+            }
+            catch
+            {
+                // Silencioso: si falla, retorna vacío
+            }
+            return state;
+        }
+
+        public void Save(BinaryWriter writer)
+        {
+            writer.Write(KnownDHTNodes.Count);
+            foreach (var node in KnownDHTNodes)
+            {
+                writer.Write(node.PublicKey);
+                writer.Write(node.LastSeen);
+            }
+
+            writer.Write(ActiveFileTransfers.Count);
+            foreach (var xfer in ActiveFileTransfers)
+            {
+                writer.Write(xfer.FriendNumber);
+                writer.Write(xfer.FileNumber);
+                writer.Write(xfer.FileName);
+                writer.Write(xfer.FileSize);
+                writer.Write(xfer.BytesReceived);
+                writer.Write((byte)xfer.Status);
+                writer.Write(xfer.FileHash ?? new byte[32]);
+            }
+        }
+    }
+
 
     /// <summary>
     /// Datos del usuario (equivalente a USER_STATE en C)

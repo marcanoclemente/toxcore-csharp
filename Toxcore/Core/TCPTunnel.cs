@@ -93,7 +93,7 @@ namespace ToxCore.Core
         private const int MAX_PACKET_SIZE = 1372; // Tamaño máximo de paquete Tox
 
         private readonly Messenger _messenger;
-        private readonly Dictionary<int, TCPTunnelConnection> _connections;
+        public readonly Dictionary<int, TCPTunnelConnection> _connections;
         private readonly object _connectionsLock = new object();
         private int _lastConnectionId;
         private bool _isRunning;

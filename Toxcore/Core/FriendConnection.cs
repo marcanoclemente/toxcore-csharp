@@ -443,45 +443,33 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// m_send_message - Enviar mensaje a amigo
+        /// Envío REAL de mensajes a amigos vía onion_data (no onion_send_1 directo)
         /// </summary>
-        public int m_send_message(int friend_number, byte[] message, int length)
+        public int m_send_message(int friendNumber, byte[] message, int length)
         {
-            Logger.Log.DebugF($"[{LOG_TAG}] Enviando mensaje a amigo {friend_number} - Tamaño: {length} bytes");
-
             if (message == null || length > 1372) return -1;
 
             try
             {
                 lock (_friendsLock)
                 {
-                    var friend = FindFriendByNumber(friend_number);
-                    if (friend?.PublicKey == null || !friend.IsOnline)
-                    {
-                        Logger.Log.WarningF($"[{LOG_TAG}] Amigo {friend_number} no disponible para envío");
-                        return -1;
-                    }
+                    var friend = FindFriendByNumber(friendNumber);
+                    if (friend?.PublicKey == null || !friend.IsOnline) return -1;
 
-                    // Crear paquete de mensaje ENCRIPTADO
-                    byte[] packet = CreateMessagePacket(message, length, friend_number);
-                    if (packet == null) return -1;
+                    // 1. Crear paquete onion_data: [type][friendNumber][message]
+                    byte[] packet = new byte[5 + length];
+                    packet[0] = 0x20; // onion_data friend message
+                    Buffer.BlockCopy(BitConverter.GetBytes(friendNumber), 0, packet, 1, 4);
+                    Buffer.BlockCopy(message, 0, packet, 5, length);
 
-                    // Enviar a través de Onion Routing
-                    int sent = _onion.onion_send_1(packet, packet.Length, friend.PublicKey);
-                    if (sent > 0)
-                    {
-                        friend.LastSeen = DateTime.UtcNow.Ticks;
-                        Logger.Log.TraceF($"[{LOG_TAG}] Mensaje enviado a amigo {friend_number}: {sent} bytes");
-                        return sent;
-                    }
-
-                    Logger.Log.WarningF($"[{LOG_TAG}] Falló envío a amigo {friend_number}");
-                    return -1;
+                    // 2. Enviar vía onion_data (cifrado en 3 capas)
+                    bool ok = _onion.Data.SendData(packet, friend.PublicKey);
+                    return ok ? length : -1;
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error enviando mensaje: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error enviando mensaje onion: {ex.Message}");
                 return -1;
             }
         }

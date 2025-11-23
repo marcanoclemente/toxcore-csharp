@@ -1,105 +1,23 @@
-﻿using System.Runtime.InteropServices;
+﻿using Sodium;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace ToxCore.Core
 {
     /// <summary>
-    /// Estructuras compatibles con DHT original de toxcore
-    /// </summary>
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct PackedNode
-    {
-        public IPPort IPPort;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-        public byte[] PublicKey;
-
-        public PackedNode(IPPort ipp, byte[] publicKey)
-        {
-            IPPort = ipp;
-            PublicKey = new byte[32];
-            if (publicKey != null)
-            {
-                Buffer.BlockCopy(publicKey, 0, PublicKey, 0, 32);
-            }
-        }
-
-        public override string ToString()
-        {
-            return $"{IPPort} [PK: {BitConverter.ToString(PublicKey, 0, 8).Replace("-", "")}...]";
-        }
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct NodeFormat
-    {
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-        public byte[] PublicKey;
-        public IPPort IPPort;
-
-        public NodeFormat(byte[] publicKey, IPPort ipp)
-        {
-            PublicKey = new byte[32];
-            if (publicKey != null)
-            {
-                Buffer.BlockCopy(publicKey, 0, PublicKey, 0, 32);
-            }
-            IPPort = ipp;
-        }
-    }
-
-    public struct DHTHandshake
-    {
-        public byte[] TemporaryPublicKey;
-        public byte[] TemporarySecretKey;
-        public byte[] PeerPublicKey;
-        public long CreationTime;
-        public IPPort EndPoint;
-    }
-
-    public struct HandshakePacket
-    {
-        public byte[] TemporaryPublicKey; // 32 bytes
-        public byte[] EncryptedPayload;   // Datos encriptados
-    }
-
-
-    /// <summary>
-    /// Nodo DHT con información completa
-    /// </summary>
-    public class DHTNode
-    {
-        public byte[] PublicKey { get; set; }
-        public IPPort EndPoint { get; set; }
-        public long LastSeen { get; set; }
-        public long LastPingSent { get; set; }
-        public int PingID { get; set; }
-        public bool IsActive { get; set; }
-        public int RTT { get; set; } // Round Trip Time
-        public int QualityScore { get; set; }
-
-        public DHTNode(byte[] publicKey, IPPort endPoint)
-        {
-            PublicKey = new byte[32];
-            Buffer.BlockCopy(publicKey, 0, PublicKey, 0, 32);
-            EndPoint = endPoint;
-            LastSeen = DateTime.UtcNow.Ticks;
-            IsActive = true;
-            QualityScore = 100;
-        }
-
-        public override string ToString()
-        {
-            return $"{EndPoint} [PK: {BitConverter.ToString(PublicKey, 0, 8).Replace("-", "")}...]";
-        }
-    }
-
-    /// <summary>
-    /// Implementación completa de DHT compatible con toxcore C
+    /// Implementación completa de Kademlia DHT compatible con toxcore C
     /// </summary>
     public class DHT
     {
         private const string LOG_TAG = "DHT";
 
-        // Constantes reales de toxcore
+        // ===== CONSTANTES TOXCORE REALES =====
         public const int MAX_FRIEND_CLOSE = 8;
         public const int CRYPTO_PACKET_SIZE = 122;
         public const int CRYPTO_NONCE_SIZE = 24;
@@ -107,89 +25,512 @@ namespace ToxCore.Core
         public const int CRYPTO_SECRET_KEY_SIZE = 32;
         public const int MAX_CLOSE_TO_BOOTSTRAP_NODES = 16;
         public const int DHT_PING_INTERVAL = 30000; // 30 segundos
-        public const int DHT_PING_TIMEOUT = 10000;  // 10 segundos
-
+        public const int DHT_PING_TIMEOUT = 10000; // 10 segundos
         public const int CRYPTO_SYMMETRIC_KEY_SIZE = 32;
         public const int CRYPTO_MAC_SIZE = 16;
-
-        // Constantes específicas de DHT
         public const int DHT_PING_SIZE = 64;
         public const int DHT_PONG_SIZE = 64;
         public const int MAX_CRYPTO_PACKET_SIZE = 1024;
 
+        // ===== CONSTANTES KADEMLIA =====
+        public const int K = 8; // K-bucket size (tamaño estándar Kademlia)
+        public const int ALPHA = 3; // Paralelismo en búsquedas
+        public const int BUCKET_REFRESH_INTERVAL = 900000; // 15 minutos
+        public const int KEY_ROTATION_INTERVAL = 60000; // 60 segundos
 
-        private long _lastCleanupTime = 0;
+        // ===== ESTRUCTURAS DE DATOS KADEMLIA =====
 
-        private DateTime _lastCleanup = DateTime.UtcNow;
-        private readonly TimeSpan _cleanupInterval = TimeSpan.FromMinutes(2);
+        /// <summary>
+        /// K-Bucket real - implementación completa de Kademlia
+        /// </summary>
+        public class KBucket
+        {
+            private readonly List<DHTNode> nodes = new List<DHTNode>(K);
+            private readonly object lockObj = new object();
+            private DateTime lastUpdated = DateTime.UtcNow;
 
-        private readonly Dictionary<string, List<DHTNode>> _closestNodesCache = new Dictionary<string, List<DHTNode>>();
-        private readonly TimeSpan _cacheTTL = TimeSpan.FromSeconds(30);
-        private readonly object _cacheLock = new object();
-        private DateTime _lastCacheCleanup = DateTime.UtcNow;
+            public int Index { get; }
+            public int Count
+            {
+                get
+                {
+                    lock (lockObj) return nodes.Count;
+                }
+            }
 
-        private readonly Dictionary<string, DHTNode> _nodesByKey;
+            public KBucket(int index)
+            {
+                Index = index;
+            }
 
+            /// <summary>
+            /// Intenta añadir un nodo al K-bucket siguiendo la política Kademlia
+            /// </summary>
+            public bool TryAddNode(DHTNode newNode)
+            {
+                lock (lockObj)
+                {
+                    // Verificar si el nodo ya existe
+                    var existing = nodes.FirstOrDefault(n => ByteArraysEqual(n.PublicKey, newNode.PublicKey));
+                    if (existing != null)
+                    {
+                        // Mover al final (LRU - Least Recently Used)
+                        nodes.Remove(existing);
+                        existing.LastSeen = DateTime.UtcNow.Ticks;
+                        existing.LastPingSent = 0;
+                        existing.IsActive = true;
+                        nodes.Add(existing);
+                        lastUpdated = DateTime.UtcNow;
+                        return true;
+                    }
+
+                    // Si hay espacio, añadir directamente
+                    if (nodes.Count < K)
+                    {
+                        newNode.LastSeen = DateTime.UtcNow.Ticks;
+                        nodes.Add(newNode);
+                        lastUpdated = DateTime.UtcNow;
+                        return true;
+                    }
+
+                    // Bucket lleno - verificar si hay nodos inactivos
+                    var oldestInactive = nodes.FirstOrDefault(n => !n.IsActive ||
+                        (DateTime.UtcNow.Ticks - n.LastSeen) > TimeSpan.TicksPerMinute * 15);
+
+                    if (oldestInactive != null)
+                    {
+                        // Reemplazar el nodo inactivo más antiguo
+                        nodes.Remove(oldestInactive);
+                        newNode.LastSeen = DateTime.UtcNow.Ticks;
+                        nodes.Add(newNode);
+                        lastUpdated = DateTime.UtcNow;
+                        return true;
+                    }
+
+                    // Todos los nodos están activos - ping al más antiguo
+                    var oldest = nodes.OrderBy(n => n.LastSeen).First();
+                    oldest.LastPingSent = DateTime.UtcNow.Ticks;
+                    return false; // No se pudo añadir ahora
+                }
+            }
+
+            /// <summary>
+            /// Obtiene los nodos del bucket ordenados por LRU
+            /// </summary>
+            public List<DHTNode> GetNodes()
+            {
+                lock (lockObj)
+                {
+                    return nodes.OrderByDescending(n => n.LastSeen).ToList();
+                }
+            }
+
+            /// <summary>
+            /// Marca un nodo como inactivo si no responde
+            /// </summary>
+            public bool MarkNodeInactive(byte[] publicKey)
+            {
+                lock (lockObj)
+                {
+                    var node = nodes.FirstOrDefault(n => ByteArraysEqual(n.PublicKey, publicKey));
+                    if (node != null)
+                    {
+                        node.IsActive = false;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+
+            /// <summary>
+            /// Limpia nodos inactivos antiguos
+            /// </summary>
+            public int CleanupInactiveNodes()
+            {
+                lock (lockObj)
+                {
+                    long cutoff = DateTime.UtcNow.Ticks - TimeSpan.TicksPerHour * 2;
+                    int removed = nodes.RemoveAll(n => !n.IsActive && n.LastSeen < cutoff);
+                    return removed;
+                }
+            }
+
+            /// <summary>
+            /// Verifica si necesita refresco (15 minutos sin actualización)
+            /// </summary>
+            public bool NeedsRefresh()
+            {
+                return (DateTime.UtcNow - lastUpdated) > TimeSpan.FromMilliseconds(BUCKET_REFRESH_INTERVAL);
+            }
+        }
+
+        /// <summary>
+        /// Tabla de routing Kademlia con 256 K-buckets
+        /// </summary>
+        public class KademliaRoutingTable
+        {
+            private readonly KBucket[] buckets = new KBucket[256];
+            private readonly byte[] localId;
+            private readonly object lockObj = new object();
+
+            public KademliaRoutingTable(byte[] localId)
+            {
+                if (localId.Length != CRYPTO_PUBLIC_KEY_SIZE)
+                    throw new ArgumentException("Local ID must be 32 bytes");
+
+                this.localId = localId;
+
+                for (int i = 0; i < 256; i++)
+                {
+                    buckets[i] = new KBucket(i);
+                }
+            }
+
+            /// <summary>
+            /// Calcula el índice del bucket basado en el prefix length compartido
+            /// </summary>
+            public int GetBucketIndex(byte[] targetId)
+            {
+                return KademliaDistance.GetSharedPrefixLength(localId, targetId);
+            }
+
+            /// <summary>
+            /// Añade un nodo a la tabla de routing
+            /// </summary>
+            public bool AddNode(DHTNode node)
+            {
+                // No añadirnos a nosotros mismos
+                if (ByteArraysEqual(node.PublicKey, localId))
+                    return false;
+
+                int bucketIndex = GetBucketIndex(node.PublicKey);
+
+                lock (lockObj)
+                {
+                    return buckets[bucketIndex].TryAddNode(node);
+                }
+            }
+
+            /// <summary>
+            /// Encuentra los K nodos más cercanos a un ID objetivo
+            /// </summary>
+            public List<DHTNode> FindClosestNodes(byte[] targetId, int count = K)
+            {
+                var candidates = new List<DHTNode>();
+
+                lock (lockObj)
+                {
+                    // Obtener nodos del bucket correspondiente
+                    int targetBucket = GetBucketIndex(targetId);
+                    candidates.AddRange(buckets[targetBucket].GetNodes());
+
+                    // Si necesitamos más nodos, buscar en buckets adyacentes
+                    if (candidates.Count < count)
+                    {
+                        for (int i = 1; i < 256 && candidates.Count < count; i++)
+                        {
+                            int lowerBucket = targetBucket - i;
+                            int upperBucket = targetBucket + i;
+
+                            if (lowerBucket >= 0)
+                                candidates.AddRange(buckets[lowerBucket].GetNodes());
+                            if (upperBucket < 256 && candidates.Count < count)
+                                candidates.AddRange(buckets[upperBucket].GetNodes());
+                        }
+                    }
+                }
+
+                // Ordenar por distancia XOR y tomar los más cercanos
+                return candidates
+                    .OrderBy(n => KademliaDistance.Calculate(localId, n.PublicKey), new KademliaDistanceComparer())
+                    .Take(count)
+                    .ToList();
+            }
+
+            /// <summary>
+            /// Obtiene todos los nodos de la tabla
+            /// </summary>
+            public List<DHTNode> GetAllNodes()
+            {
+                var allNodes = new List<DHTNode>();
+                lock (lockObj)
+                {
+                    foreach (var bucket in buckets)
+                    {
+                        allNodes.AddRange(bucket.GetNodes());
+                    }
+                }
+                return allNodes;
+            }
+
+            /// <summary>
+            /// Marca un nodo como inactivo
+            /// </summary>
+            public bool MarkNodeInactive(byte[] publicKey)
+            {
+                int bucketIndex = GetBucketIndex(publicKey);
+                lock (lockObj)
+                {
+                    return buckets[bucketIndex].MarkNodeInactive(publicKey);
+                }
+            }
+
+            /// <summary>
+            /// Limpieza general de buckets inactivos
+            /// </summary>
+            public int CleanupAllBuckets()
+            {
+                int totalRemoved = 0;
+                lock (lockObj)
+                {
+                    foreach (var bucket in buckets)
+                    {
+                        totalRemoved += bucket.CleanupInactiveNodes();
+                    }
+                }
+                return totalRemoved;
+            }
+
+            /// <summary>
+            /// Obtiene buckets que necesitan refresco
+            /// </summary>
+            public List<int> GetBucketsNeedingRefresh()
+            {
+                var needingRefresh = new List<int>();
+                lock (lockObj)
+                {
+                    for (int i = 0; i < 256; i++)
+                    {
+                        if (buckets[i].NeedsRefresh())
+                        {
+                            needingRefresh.Add(i);
+                        }
+                    }
+                }
+                return needingRefresh;
+            }
+        }
+
+        /// <summary>
+        /// Utilidades para cálculos Kademlia
+        /// </summary>
+        public static class KademliaDistance
+        {
+            /// <summary>
+            /// Calcula la distancia XOR entre dos IDs
+            /// </summary>
+            public static byte[] Calculate(byte[] id1, byte[] id2)
+            {
+                if (id1.Length != id2.Length)
+                    throw new ArgumentException("IDs must have same length");
+
+                var result = new byte[id1.Length];
+                for (int i = 0; i < id1.Length; i++)
+                {
+                    result[i] = (byte)(id1[i] ^ id2[i]);
+                }
+                return result;
+            }
+
+            /// <summary>
+            /// Calcula la longitud del prefix compartido en bits
+            /// </summary>
+            public static int GetSharedPrefixLength(byte[] id1, byte[] id2)
+            {
+                int sharedBits = 0;
+                for (int i = 0; i < id1.Length; i++)
+                {
+                    byte xor = (byte)(id1[i] ^ id2[i]);
+                    if (xor == 0)
+                    {
+                        sharedBits += 8;
+                    }
+                    else
+                    {
+                        int j = 7;
+                        while (j >= 0 && ((xor >> j) & 1) == 0)
+                        {
+                            sharedBits++;
+                            j--;
+                        }
+                        break;
+                    }
+                }
+                return Math.Min(sharedBits, 255); // Máximo 255 para array de 256
+            }
+
+            /// <summary>
+            /// Verifica si dos nodos estarían en el mismo bucket
+            /// </summary>
+            public static bool InSameBucket(byte[] localId, byte[] targetId, int bucketIndex)
+            {
+                return GetSharedPrefixLength(localId, targetId) >= bucketIndex;
+            }
+        }
+
+        /// <summary>
+        /// Comparador para ordenar por distancia XOR (Kademlia)
+        /// </summary>
+        public class KademliaDistanceComparer : IComparer<byte[]>
+        {
+            public int Compare(byte[] x, byte[] y)
+            {
+                // Comparación bit a bit, más significativo primero
+                for (int i = 0; i < x.Length; i++)
+                {
+                    if (x[i] != y[i])
+                    {
+                        // En Kademlia, menor distancia = más cercano
+                        return x[i].CompareTo(y[i]);
+                    }
+                }
+                return 0;
+            }
+        }
+
+        // ===== ESTRUCTURAS COMPATIBLES CON TOXCORE ORIGINAL =====
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct PackedNode
+        {
+            public IPPort IPPort;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+            public byte[] PublicKey;
+
+            public PackedNode(IPPort ipp, byte[] publicKey)
+            {
+                IPPort = ipp;
+                PublicKey = new byte[32];
+                if (publicKey != null)
+                {
+                    Buffer.BlockCopy(publicKey, 0, PublicKey, 0, 32);
+                }
+            }
+
+            public override string ToString()
+            {
+                return $"{IPPort} [PK: {BitConverter.ToString(PublicKey, 0, 8).Replace("-", "")}...]";
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct NodeFormat
+        {
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+            public byte[] PublicKey;
+            public IPPort IPPort;
+
+            public NodeFormat(byte[] publicKey, IPPort ipp)
+            {
+                PublicKey = new byte[32];
+                if (publicKey != null)
+                {
+                    Buffer.BlockCopy(publicKey, 0, PublicKey, 0, 32);
+                }
+                IPPort = ipp;
+            }
+        }
+
+        public struct DHTHandshake
+        {
+            public byte[] TemporaryPublicKey;
+            public byte[] TemporarySecretKey;
+            public byte[] PeerPublicKey;
+            public long CreationTime;
+            public IPPort EndPoint;
+        }
+
+        public struct HandshakePacket
+        {
+            public byte[] TemporaryPublicKey;
+            public byte[] EncryptedPayload;
+        }
+
+        /// <summary>
+        /// Nodo DHT con información completa y métricas Kademlia
+        /// </summary>
+        public class DHTNode
+        {
+            public byte[] PublicKey { get; set; }
+            public IPPort EndPoint { get; set; }
+            public long LastSeen { get; set; }
+            public long LastPingSent { get; set; }
+            public int PingID { get; set; }
+            public bool IsActive { get; set; }
+            public int RTT { get; set; }
+            public int QualityScore { get; set; }
+            public int FailedPings { get; set; }
+            public long FirstSeen { get; set; }
+
+            public DHTNode(byte[] publicKey, IPPort endPoint)
+            {
+                PublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(publicKey, 0, PublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+                EndPoint = endPoint;
+                LastSeen = DateTime.UtcNow.Ticks;
+                FirstSeen = DateTime.UtcNow.Ticks;
+                IsActive = true;
+                QualityScore = 100;
+                FailedPings = 0;
+            }
+
+            public override string ToString()
+            {
+                return $"{EndPoint} [PK: {BitConverter.ToString(PublicKey, 0, 8).Replace("-", "")}...]";
+            }
+        }
+
+        // ===== CAMPOS PRIVADOS =====
+
+        private readonly KademliaRoutingTable routingTable;
+        private readonly Dictionary<string, DHTHandshake> activeHandshakes;
+        private readonly object handshakesLock = new object();
 
         public byte[] SelfPublicKey { get; private set; }
         public byte[] SelfSecretKey { get; private set; }
         public int Socket { get; private set; }
 
-        private readonly List<DHTNode> _nodes;
-        private readonly List<PackedNode> _bootstrapNodes;
-        private readonly object _nodesLock = new object();
-        private int _lastPingID;
-        private long _lastBootstrapTime;
-
-        private long _lastLogTime = 0;
-
-        // Estadísticas
-        public int TotalNodes => _nodes.Count;
-        public int ActiveNodes
-        {
-            get
-            {
-                lock (_nodesLock)
-                {
-                    return _nodes.Count(n => n.IsActive);
-                }
-            }
-        }
-
-        private readonly Dictionary<string, DHTHandshake> _activeHandshakes;
-        private readonly object _handshakesLock = new object();
-        private const int HANDSHAKE_TIMEOUT = 30000; // 30 segundos
+        private readonly List<PackedNode> bootstrapNodes;
+        private int lastPingID;
+        private long lastBootstrapTime;
+        private long lastMaintenanceTime;
+        private long lastLogTime;
 
         // Claves temporales para handshake
-        private byte[] _currentTempPublicKey;
-        private byte[] _currentTempSecretKey;
-        private long _lastKeyRotation;
-        private const int KEY_ROTATION_INTERVAL = 60000; // Rotar cada 60 segundos
+        private byte[] currentTempPublicKey;
+        private byte[] currentTempSecretKey;
+        private long lastKeyRotation;
 
+        // Estadísticas
+        public int TotalNodes => routingTable.GetAllNodes().Count;
+        public int ActiveNodes => routingTable.GetAllNodes().Count(n => n.IsActive);
 
+        // ===== CONSTRUCTOR =====
 
         public DHT(byte[] selfPublicKey, byte[] selfSecretKey)
         {
+            if (selfPublicKey?.Length != CRYPTO_PUBLIC_KEY_SIZE || selfSecretKey?.Length != CRYPTO_SECRET_KEY_SIZE)
+                throw new ArgumentException("Invalid key sizes");
+
             SelfPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
             SelfSecretKey = new byte[CRYPTO_SECRET_KEY_SIZE];
             Buffer.BlockCopy(selfPublicKey, 0, SelfPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
             Buffer.BlockCopy(selfSecretKey, 0, SelfSecretKey, 0, CRYPTO_SECRET_KEY_SIZE);
 
-            _nodes = new List<DHTNode>();
-            _bootstrapNodes = new List<PackedNode>();
-            _nodesByKey = new Dictionary<string, DHTNode>();
+            routingTable = new KademliaRoutingTable(SelfPublicKey);
+            bootstrapNodes = new List<PackedNode>();
+            activeHandshakes = new Dictionary<string, DHTHandshake>();
 
-            // ✅ INICIALIZAR DICCIONARIOS FALTANTES
-            _activeHandshakes = new Dictionary<string, DHTHandshake>();
-
-            _lastPingID = 0;
-            _lastBootstrapTime = 0;
+            lastPingID = 0;
+            lastBootstrapTime = 0;
+            lastMaintenanceTime = 0;
+            lastLogTime = 0;
 
             Socket = Network.new_socket(2, 2, 17); // IPv4 UDP
-            Logger.Log.InfoF($"[{LOG_TAG}] DHT inicializado - Socket: {Socket}");
+            Logger.Log.InfoF($"[{LOG_TAG}] DHT Kademlia inicializado - Socket: {Socket}");
         }
 
-        // ==================== FUNCIONES COMPATIBLES CON C ORIGINAL ====================
+        // ===== MÉTODOS PÚBLICOS COMPATIBLES CON TOXCORE =====
 
         /// <summary>
         /// DHT_bootstrap - Compatible con C original
@@ -203,7 +544,7 @@ namespace ToxCore.Core
             try
             {
                 var bootstrapNode = new PackedNode(ipp, public_key);
-                _bootstrapNodes.Add(bootstrapNode);
+                bootstrapNodes.Add(bootstrapNode);
 
                 // Enviar get_nodes request encriptado
                 byte[] packet = CreateEncryptedGetNodesPacket(public_key, SelfPublicKey);
@@ -219,6 +560,86 @@ namespace ToxCore.Core
             }
         }
 
+        /// <summary>
+        /// DHT_handle_packet - Maneja paquetes entrantes
+        /// </summary>
+        public int DHT_handle_packet(byte[] packet, int length, IPPort source)
+        {
+            if (packet == null || length < 1 + CRYPTO_PUBLIC_KEY_SIZE) return -1;
+
+            try
+            {
+                byte packetType = packet[0];
+
+                // Paquetes encriptados
+                if (packetType >= 0x80)
+                {
+                    return HandleCryptopacket(source, packet, length, SelfPublicKey);
+                }
+
+                // Paquetes de handshake
+                switch (packetType)
+                {
+                    case 0x10: // Handshake request
+                        return HandleHandshakeRequest(packet, length, source);
+                    case 0x11: // Handshake response
+                        return HandleHandshakeResponse(packet, length, source);
+                    default:
+                        Logger.Log.DebugF($"[{LOG_TAG}] Tipo de paquete desconocido: 0x{packetType:X2}");
+                        return -1;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error manejando paquete: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// DHT_send_packet - Compatible con C original
+        /// </summary>
+        public int DHT_send_packet(IPPort ipp, byte[] packet, int length)
+        {
+            if (Socket == -1) return -1;
+            return Network.socket_send(Socket, packet, length, ipp);
+        }
+
+        /// <summary>
+        /// DHT_get_nodes - Compatible con C original
+        /// </summary>
+        public int DHT_get_nodes(byte[] nodes, int length, IPPort ipp)
+        {
+            if (nodes == null || length < 1) return -1;
+
+            try
+            {
+                var closestNodes = routingTable.FindClosestNodes(SelfPublicKey, MAX_FRIEND_CLOSE);
+                int offset = 0;
+
+                foreach (var node in closestNodes)
+                {
+                    if (offset + 50 > length) break; // 32 + 18 = 50 bytes por nodo
+
+                    // Copiar clave pública
+                    Buffer.BlockCopy(node.PublicKey, 0, nodes, offset, CRYPTO_PUBLIC_KEY_SIZE);
+                    offset += CRYPTO_PUBLIC_KEY_SIZE;
+
+                    // Copiar IPPort
+                    byte[] ippBytes = IPPortToBytes(node.EndPoint);
+                    Buffer.BlockCopy(ippBytes, 0, nodes, offset, 18);
+                    offset += 18;
+                }
+
+                return offset; // Total bytes escritos
+            }
+            catch (Exception)
+            {
+                return -1;
+            }
+        }
+
+        // ===== HANDSHAKE CRIPTOGRÁFICO REAL =====
 
         /// <summary>
         /// Genera o rota las claves temporales para handshake
@@ -227,13 +648,13 @@ namespace ToxCore.Core
         {
             long currentTime = DateTime.UtcNow.Ticks;
 
-            if (_currentTempPublicKey == null ||
-                (currentTime - _lastKeyRotation) > TimeSpan.TicksPerMillisecond * KEY_ROTATION_INTERVAL)
+            if (currentTempPublicKey == null ||
+                (currentTime - lastKeyRotation) > TimeSpan.TicksPerMillisecond * KEY_ROTATION_INTERVAL)
             {
                 var keyPair = CryptoBox.GenerateKeyPair();
-                _currentTempPublicKey = keyPair.PublicKey;
-                _currentTempSecretKey = keyPair.PrivateKey;
-                _lastKeyRotation = currentTime;
+                currentTempPublicKey = keyPair.PublicKey;
+                currentTempSecretKey = keyPair.PrivateKey;
+                lastKeyRotation = currentTime;
 
                 Logger.Log.DebugF($"[{LOG_TAG}] Claves temporales rotadas");
             }
@@ -266,7 +687,7 @@ namespace ToxCore.Core
                 }
 
                 // Construir paquete de handshake
-                byte[] handshakePacket = CreateHandshakePacket(_currentTempPublicKey, encryptionNonce, encryptedPayload);
+                byte[] handshakePacket = CreateHandshakePacket(currentTempPublicKey, encryptionNonce, encryptedPayload);
 
                 // Enviar handshake
                 int sent = DHT_send_packet(endPoint, handshakePacket, handshakePacket.Length);
@@ -275,8 +696,8 @@ namespace ToxCore.Core
                 // Registrar handshake pendiente
                 var handshake = new DHTHandshake
                 {
-                    TemporaryPublicKey = _currentTempPublicKey,
-                    TemporarySecretKey = _currentTempSecretKey,
+                    TemporaryPublicKey = currentTempPublicKey,
+                    TemporarySecretKey = currentTempSecretKey,
                     PeerPublicKey = peerPublicKey,
                     CreationTime = DateTime.UtcNow.Ticks,
                     EndPoint = endPoint
@@ -284,9 +705,9 @@ namespace ToxCore.Core
 
                 string handshakeKey = $"{endPoint}_{BitConverter.ToString(peerPublicKey).Replace("-", "").Substring(0, 16)}";
 
-                lock (_handshakesLock)
+                lock (handshakesLock)
                 {
-                    _activeHandshakes[handshakeKey] = handshake;
+                    activeHandshakes[handshakeKey] = handshake;
                 }
 
                 Logger.Log.DebugF($"[{LOG_TAG}] Handshake iniciado con {endPoint}");
@@ -295,85 +716,6 @@ namespace ToxCore.Core
             catch (Exception ex)
             {
                 Logger.Log.ErrorF($"[{LOG_TAG}] Error iniciando handshake: {ex.Message}");
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// Crea paquete de handshake
-        /// </summary>
-        private byte[] CreateHandshakePacket(byte[] tempPublicKey, byte[] nonce, byte[] encryptedPayload)
-        {
-            byte[] packet = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + encryptedPayload.Length];
-            packet[0] = 0x10; // HANDSHAKE_REQUEST packet type
-
-            Buffer.BlockCopy(tempPublicKey, 0, packet, 1, CRYPTO_PUBLIC_KEY_SIZE);
-            Buffer.BlockCopy(nonce, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_NONCE_SIZE);
-            Buffer.BlockCopy(encryptedPayload, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload.Length);
-
-            return packet;
-        }
-
-        /// <summary>
-        /// Maneja respuesta de handshake
-        /// </summary>
-        private int HandleHandshakeResponse(byte[] packet, int length, IPPort source)
-        {
-            try
-            {
-                if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + 16)
-                    return -1;
-
-                // Extraer temporary public key del remitente
-                byte[] peerTempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                Buffer.BlockCopy(packet, 1, peerTempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-
-                // Buscar handshake pendiente
-                var handshake = FindHandshakeByTempKey(peerTempPublicKey, source);
-                if (handshake == null)
-                {
-                    Logger.Log.DebugF($"[{LOG_TAG}] Handshake no encontrado para {source}");
-                    return -1;
-                }
-
-                // Extraer y desencriptar payload
-                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
-                byte[] encryptedPayload = new byte[length - 1 - CRYPTO_PUBLIC_KEY_SIZE - CRYPTO_NONCE_SIZE];
-
-                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, nonce, 0, CRYPTO_NONCE_SIZE);
-                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload, 0, encryptedPayload.Length);
-
-                // Desencriptar con nuestra temporary secret key
-                byte[] decrypted = CryptoBox.Decrypt(encryptedPayload, nonce, peerTempPublicKey, handshake.Value.TemporarySecretKey);
-                if (decrypted == null || decrypted.Length < CRYPTO_PUBLIC_KEY_SIZE)
-                {
-                    Logger.Log.ErrorF($"[{LOG_TAG}] No se pudo desencriptar respuesta de handshake");
-                    return -1;
-                }
-
-                // Extraer public key real del peer
-                byte[] peerRealPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                Buffer.BlockCopy(decrypted, 0, peerRealPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-
-                // Verificar que coincide con la public key esperada
-                if (!CryptoVerify.Verify32(peerRealPublicKey, handshake.Value.PeerPublicKey))
-                {
-                    Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en handshake");
-                    return -1;
-                }
-
-                // Handshake completado - agregar nodo a la DHT
-                AddNode(peerRealPublicKey, source);
-
-                // Limpiar handshake
-                RemoveHandshake(peerTempPublicKey, source);
-
-                Logger.Log.InfoF($"[{LOG_TAG}] Handshake completado con {source}");
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error manejando respuesta de handshake: {ex.Message}");
                 return -1;
             }
         }
@@ -420,7 +762,7 @@ namespace ToxCore.Core
 
                 // Encriptar respuesta con la temporary public key del peer
                 byte[] responseNonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
-                byte[] encryptedResponse = CryptoBox.Encrypt(responsePayload, responseNonce, peerTempPublicKey, _currentTempSecretKey);
+                byte[] encryptedResponse = CryptoBox.Encrypt(responsePayload, responseNonce, peerTempPublicKey, currentTempSecretKey);
 
                 if (encryptedResponse == null)
                 {
@@ -429,7 +771,7 @@ namespace ToxCore.Core
                 }
 
                 // Enviar respuesta
-                byte[] responsePacket = CreateHandshakeResponsePacket(_currentTempPublicKey, responseNonce, encryptedResponse);
+                byte[] responsePacket = CreateHandshakeResponsePacket(currentTempPublicKey, responseNonce, encryptedResponse);
                 int sent = DHT_send_packet(source, responsePacket, responsePacket.Length);
 
                 if (sent > 0)
@@ -449,180 +791,73 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// Crea paquete de respuesta de handshake
+        /// Maneja respuesta de handshake
         /// </summary>
-        private byte[] CreateHandshakeResponsePacket(byte[] tempPublicKey, byte[] nonce, byte[] encryptedPayload)
+        private int HandleHandshakeResponse(byte[] packet, int length, IPPort source)
         {
-            byte[] packet = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + encryptedPayload.Length];
-            packet[0] = 0x11; // HANDSHAKE_RESPONSE packet type
-
-            Buffer.BlockCopy(tempPublicKey, 0, packet, 1, CRYPTO_PUBLIC_KEY_SIZE);
-            Buffer.BlockCopy(nonce, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_NONCE_SIZE);
-            Buffer.BlockCopy(encryptedPayload, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload.Length);
-
-            return packet;
-        }
-
-        // Métodos auxiliares para gestión de handshakes
-        private DHTHandshake? FindHandshakeByTempKey(byte[] tempPublicKey, IPPort endPoint)
-        {
-            string targetKey = $"{endPoint}_{BitConverter.ToString(tempPublicKey).Replace("-", "").Substring(0, 16)}";
-
-            lock (_handshakesLock)
-            {
-                if (_activeHandshakes.TryGetValue(targetKey, out var handshake))
-                {
-                    return handshake;
-                }
-            }
-            return null;
-        }
-
-        private void RemoveHandshake(byte[] tempPublicKey, IPPort endPoint)
-        {
-            string handshakeKey = $"{endPoint}_{BitConverter.ToString(tempPublicKey).Replace("-", "").Substring(0, 16)}";
-
-            lock (_handshakesLock)
-            {
-                _activeHandshakes.Remove(handshakeKey);
-            }
-        }
-
-        /// <summary>
-        /// Limpia handshakes expirados
-        /// </summary>
-        private void CleanupExpiredHandshakes()
-        {
-            long cutoffTime = DateTime.UtcNow.Ticks - TimeSpan.TicksPerMillisecond * HANDSHAKE_TIMEOUT;
-            int removed = 0;
-
-            lock (_handshakesLock)
-            {
-                var expiredKeys = new List<string>();
-
-                foreach (var kvp in _activeHandshakes)
-                {
-                    if (kvp.Value.CreationTime < cutoffTime)
-                    {
-                        expiredKeys.Add(kvp.Key);
-                    }
-                }
-
-                foreach (var key in expiredKeys)
-                {
-                    _activeHandshakes.Remove(key);
-                    removed++;
-                }
-            }
-
-            if (removed > 0)
-            {
-                Logger.Log.DebugF($"[{LOG_TAG}] {removed} handshakes expirados removidos");
-            }
-        }
-
-
-        /// <summary>
-        /// DHT_handle_packet - ACTUALIZADO para usar handshake real
-        /// </summary>
-        public int DHT_handle_packet(byte[] packet, int length, IPPort source)
-        {
-            if (packet == null || length < 1 + CRYPTO_PUBLIC_KEY_SIZE) return -1;
-
             try
             {
-                byte packetType = packet[0];
+                if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + 16)
+                    return -1;
 
-                // Paquetes encriptados van directamente a HandleCryptopacket
-                if (packetType >= 0x80) // Paquetes encriptados (como en toxcore)
+                // Extraer temporary public key del remitente
+                byte[] peerTempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1, peerTempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Buscar handshake pendiente
+                var handshake = FindHandshakeByTempKey(peerTempPublicKey, source);
+                if (handshake == null)
                 {
-                    // Intentar con nuestra public key primero
-                    int result = HandleCryptopacket(source, packet, length, SelfPublicKey);
-                    if (result == 0) return 0;
-
-                    // Si falla, podría ser para otro peer (enrutamiento)
-                    // Aquí iría lógica adicional de enrutamiento DHT
+                    Logger.Log.DebugF($"[{LOG_TAG}] Handshake no encontrado para {source}");
                     return -1;
                 }
 
-                // Paquetes no-encriptados (para compatibilidad)
-                switch (packetType)
+                // Extraer y desencriptar payload
+                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
+                byte[] encryptedPayload = new byte[length - 1 - CRYPTO_PUBLIC_KEY_SIZE - CRYPTO_NONCE_SIZE];
+
+                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, nonce, 0, CRYPTO_NONCE_SIZE);
+                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload, 0, encryptedPayload.Length);
+
+                // Desencriptar con nuestra temporary secret key
+                byte[] decrypted = CryptoBox.Decrypt(encryptedPayload, nonce, peerTempPublicKey, handshake.Value.TemporarySecretKey);
+                if (decrypted == null || decrypted.Length < CRYPTO_PUBLIC_KEY_SIZE)
                 {
-                    case 0x10: // Handshake request
-                        return HandleHandshakeRequest(packet, length, source);
-                    case 0x11: // Handshake response  
-                        return HandleHandshakeResponse(packet, length, source);
-                    default:
-                        Logger.Log.DebugF($"[{LOG_TAG}] Tipo de paquete no-encriptado desconocido: 0x{packetType:X2}");
-                        return -1;
+                    Logger.Log.ErrorF($"[{LOG_TAG}] No se pudo desencriptar respuesta de handshake");
+                    return -1;
                 }
+
+                // Extraer public key real del peer
+                byte[] peerRealPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(decrypted, 0, peerRealPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Verificar que coincide con la public key esperada
+                if (!ByteArraysEqual(peerRealPublicKey, handshake.Value.PeerPublicKey))
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en handshake");
+                    return -1;
+                }
+
+                // Handshake completado - agregar nodo a la DHT
+                AddNode(peerRealPublicKey, source);
+
+                // Limpiar handshake
+                RemoveHandshake(peerTempPublicKey, source);
+
+                Logger.Log.InfoF($"[{LOG_TAG}] Handshake completado con {source}");
+                return 0;
             }
             catch (Exception ex)
             {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error manejando paquete: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error manejando respuesta de handshake: {ex.Message}");
                 return -1;
             }
         }
 
-        private int HandleEncryptedPingRequest(byte[] packet, int length, IPPort source)
-        {
-            // ✅ IMPLEMENTACIÓN REAL: Usar handshake criptográfico para obtener la public key
-            if (HandleEncryptedPingPacket(packet, length - 1, source, out byte[] senderPublicKey))
-            {
-                // En lugar de simular, iniciamos un handshake para obtener la public key real
-                // Buscar si ya tenemos un nodo en esta dirección IP
-                var existingNode = FindNodeByEndpoint(source);
-                if (existingNode != null)
-                {
-                    // Ya tenemos este nodo, actualizar last seen
-                    existingNode.LastSeen = DateTime.UtcNow.Ticks;
-                    existingNode.IsActive = true;
-
-                    // Enviar respuesta ping con la public key conocida
-                    byte[] responsePacket = CreateEncryptedPingPacket(existingNode.PublicKey);
-                    if (responsePacket != null)
-                    {
-                        return DHT_send_packet(source, responsePacket, responsePacket.Length);
-                    }
-                }
-                else
-                {
-                    // ✅ NUEVO NODO: Iniciar handshake para obtener su public key
-                    Logger.Log.DebugF($"[{LOG_TAG}] Nuevo ping de {source}, iniciando handshake...");
-
-                    // Para pings de nodos desconocidos, podríamos:
-                    // 1. Enviar un handshake request
-                    // 2. O incluir información de handshake en la respuesta ping
-                    // Por ahora, simplemente respondemos el ping y confiamos en que iniciarán handshake
-
-                    byte[] simulatedResponse = CreateEncryptedPingPacket(SelfPublicKey); // Usamos nuestra PK como destino
-                    if (simulatedResponse != null)
-                    {
-                        return DHT_send_packet(source, simulatedResponse, simulatedResponse.Length);
-                    }
-                }
-            }
-
-            Logger.Log.DebugF($"[{LOG_TAG}] Ping request inválido de {source}");
-            return -1;
-        }
+        // ===== MANEJO DE PAQUETES ENCRIPTADOS DHT =====
 
         /// <summary>
-        /// Busca un nodo por su endpoint (IP + puerto)
-        /// </summary>
-        private DHTNode FindNodeByEndpoint(IPPort endPoint)
-        {
-            lock (_nodesLock)
-            {
-                return _nodes.Find(n =>
-                    n.EndPoint.IP.ToString() == endPoint.IP.ToString() &&
-                    n.EndPoint.Port == endPoint.Port);
-            }
-        }
-
-        /// <summary>
-        /// HandleCryptopacket - Como en DHT.c cryptopacket_handle()
-        /// Maneja paquetes encriptados DHT reales
+        /// HandleCryptopacket - Maneja paquetes encriptados DHT reales
         /// </summary>
         public int HandleCryptopacket(IPPort source, byte[] packet, int length, byte[] publicKey)
         {
@@ -673,7 +908,7 @@ namespace ToxCore.Core
                 case 0x00: // Ping request
                     return HandleDecryptedPingRequest(source, decrypted, length, expectedPublicKey);
 
-                case 0x01: // Ping response  
+                case 0x01: // Ping response
                     return HandleDecryptedPingResponse(source, decrypted, length, expectedPublicKey);
 
                 case 0x02: // Get nodes request
@@ -688,9 +923,8 @@ namespace ToxCore.Core
             }
         }
 
-
         /// <summary>
-        /// HandleDecryptedPingRequest - Como en DHT.c handle_ping_request()
+        /// HandleDecryptedPingRequest - Maneja ping request encriptado
         /// </summary>
         private int HandleDecryptedPingRequest(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
         {
@@ -703,14 +937,15 @@ namespace ToxCore.Core
                 Buffer.BlockCopy(packet, 1, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
 
                 // Verificar que coincide con la key esperada
-                if (!CryptoVerify.Verify32(senderPublicKey, expectedPublicKey))
+                if (!ByteArraysEqual(senderPublicKey, expectedPublicKey))
                 {
                     Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en ping request");
                     return -1;
                 }
 
-                // Agregar/actualizar nodo
-                AddNode(senderPublicKey, source);
+                // Agregar/actualizar nodo en la tabla Kademlia
+                var node = new DHTNode(senderPublicKey, source);
+                routingTable.AddNode(node);
 
                 // Enviar pong response
                 byte[] pongResponse = CreateDhtPongResponse(senderPublicKey);
@@ -729,7 +964,7 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// HandleDecryptedPingResponse - Maneja respuesta PONG encriptada
+        /// HandleDecryptedPingResponse - Maneja ping response encriptado
         /// </summary>
         private int HandleDecryptedPingResponse(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
         {
@@ -742,14 +977,15 @@ namespace ToxCore.Core
                 Buffer.BlockCopy(packet, 1, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
 
                 // Verificar que coincide con la key esperada
-                if (!CryptoVerify.Verify32(senderPublicKey, expectedPublicKey))
+                if (!ByteArraysEqual(senderPublicKey, expectedPublicKey))
                 {
                     Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en ping response");
                     return -1;
                 }
 
-                // Actualizar nodo - marcar como activo y actualizar last seen
-                AddNode(senderPublicKey, source);
+                // Actualizar nodo en la tabla Kademlia
+                var node = new DHTNode(senderPublicKey, source);
+                routingTable.AddNode(node);
 
                 Logger.Log.DebugF($"[{LOG_TAG}] Ping response recibido de {source}");
                 return 0;
@@ -762,30 +998,165 @@ namespace ToxCore.Core
         }
 
         /// <summary>
-        /// CreateDhtPongResponse - Crea respuesta PONG encriptada real
+        /// HandleDecryptedGetNodesRequest - Maneja get_nodes request encriptado
         /// </summary>
-        private byte[] CreateDhtPongResponse(byte[] destinationPublicKey)
+        private int HandleDecryptedGetNodesRequest(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
         {
+            if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE * 2) return -1;
+
             try
             {
-                // Crear payload PONG: [0x01][nuestra_public_key]
-                byte[] pongPayload = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE];
-                pongPayload[0] = 0x01; // PONG type
-                Buffer.BlockCopy(SelfPublicKey, 0, pongPayload, 1, CRYPTO_PUBLIC_KEY_SIZE);
+                // Extraer public key del solicitante (bytes 1-32)
+                byte[] senderPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
 
-                // Encriptar el pong
-                return CreateCryptopacket(pongPayload, pongPayload.Length, destinationPublicKey, SelfSecretKey);
+                // Extraer public key objetivo de búsqueda (bytes 33-64)
+                byte[] targetPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, targetPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Verificar que la key del solicitante coincide
+                if (!ByteArraysEqual(senderPublicKey, expectedPublicKey))
+                {
+                    Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en get_nodes request");
+                    return -1;
+                }
+
+                // Agregar/actualizar nodo del solicitante
+                var senderNode = new DHTNode(senderPublicKey, source);
+                routingTable.AddNode(senderNode);
+
+                // Obtener los K nodos más cercanos al objetivo usando Kademlia
+                var closestNodes = routingTable.FindClosestNodes(targetPublicKey, K);
+                if (closestNodes.Count > 0)
+                {
+                    // Enviar respuesta SEND_NODES
+                    byte[] nodesResponse = CreateDhtSendNodesResponse(senderPublicKey, closestNodes);
+                    if (nodesResponse != null)
+                    {
+                        return DHT_send_packet(source, nodesResponse, nodesResponse.Length);
+                    }
+                }
+
+                return -1;
             }
             catch (Exception ex)
             {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando pong response: {ex.Message}");
-                return null;
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleDecryptedGetNodesRequest: {ex.Message}");
+                return -1;
             }
         }
 
         /// <summary>
-        /// CreateCryptopacket - Como en DHT.c create_crypto_packet()
-        /// Crea paquetes encriptados DHT reales
+        /// HandleDecryptedSendNodesResponse - Maneja send_nodes response encriptado
+        /// </summary>
+        private int HandleDecryptedSendNodesResponse(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
+        {
+            if (length < 1) return -1;
+
+            try
+            {
+                // El payload es: [0x04] + [nodos*(public_key + ipport)]
+                int nodesDataLength = length - 1;
+
+                // Cada nodo ocupa 50 bytes (32 + 18)
+                int nodeCount = nodesDataLength / 50;
+
+                int nodesAdded = 0;
+                for (int i = 0; i < nodeCount; i++)
+                {
+                    int offset = 1 + (i * 50);
+
+                    // Extraer public key del nodo (32 bytes)
+                    byte[] nodePublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                    Buffer.BlockCopy(packet, offset, nodePublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                    // Extraer IPPort (18 bytes)
+                    byte[] ippBytes = new byte[18];
+                    Buffer.BlockCopy(packet, offset + CRYPTO_PUBLIC_KEY_SIZE, ippBytes, 0, 18);
+
+                    IPPort nodeIPPort = BytesToIPPort(ippBytes);
+
+                    // Solo agregar nodos válidos
+                    if (nodeIPPort.Port > 0 && nodeIPPort.IP.Data != null)
+                    {
+                        var newNode = new DHTNode(nodePublicKey, nodeIPPort);
+                        routingTable.AddNode(newNode);
+                        nodesAdded++;
+                    }
+                }
+
+                Logger.Log.DebugF($"[{LOG_TAG}] {nodesAdded} nodos agregados desde send_nodes de {source}");
+                return nodesAdded > 0 ? 0 : -1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleDecryptedSendNodesResponse: {ex.Message}");
+                return -1;
+            }
+        }
+
+        // ===== FUNCIONES DE CREACIÓN DE PAQUETES =====
+
+        /// <summary>
+        /// Crea paquete de handshake
+        /// </summary>
+        private byte[] CreateHandshakePacket(byte[] tempPublicKey, byte[] nonce, byte[] encryptedPayload)
+        {
+            byte[] packet = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + encryptedPayload.Length];
+            packet[0] = 0x10; // HANDSHAKE_REQUEST packet type
+
+            Buffer.BlockCopy(tempPublicKey, 0, packet, 1, CRYPTO_PUBLIC_KEY_SIZE);
+            Buffer.BlockCopy(nonce, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_NONCE_SIZE);
+            Buffer.BlockCopy(encryptedPayload, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload.Length);
+
+            return packet;
+        }
+
+        /// <summary>
+        /// Crea paquete de respuesta de handshake
+        /// </summary>
+        private byte[] CreateHandshakeResponsePacket(byte[] tempPublicKey, byte[] nonce, byte[] encryptedPayload)
+        {
+            byte[] packet = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE + encryptedPayload.Length];
+            packet[0] = 0x11; // HANDSHAKE_RESPONSE packet type
+
+            Buffer.BlockCopy(tempPublicKey, 0, packet, 1, CRYPTO_PUBLIC_KEY_SIZE);
+            Buffer.BlockCopy(nonce, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, CRYPTO_NONCE_SIZE);
+            Buffer.BlockCopy(encryptedPayload, 0, packet, 1 + CRYPTO_PUBLIC_KEY_SIZE + CRYPTO_NONCE_SIZE, encryptedPayload.Length);
+
+            return packet;
+        }
+
+        /// <summary>
+        /// DHT_get_shared_key_recv - Calcula la shared key para decryptar paquetes entrantes
+        /// </summary>
+        public int DHT_get_shared_key_recv(byte[] sharedKey, byte[] packet, byte[] secretKey)
+        {
+            try
+            {
+                if (sharedKey == null || packet == null || secretKey == null)
+                    return -1;
+
+                // Extraer la public key temporal del remitente (primeros 32 bytes)
+                byte[] tempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+                Buffer.BlockCopy(packet, 0, tempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+
+                // Calcular shared key usando crypto_box_beforenm
+                byte[] calculatedKey = CryptoBox.BeforeNm(tempPublicKey, secretKey);
+                if (calculatedKey == null) return -1;
+
+                Buffer.BlockCopy(calculatedKey, 0, sharedKey, 0, CRYPTO_SYMMETRIC_KEY_SIZE);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en DHT_get_shared_key_recv: {ex.Message}");
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// CreateCryptopacket - Crea paquetes encriptados DHT reales
         /// </summary>
         public byte[] CreateCryptopacket(byte[] data, int length, byte[] publicKey, byte[] secretKey)
         {
@@ -825,96 +1196,25 @@ namespace ToxCore.Core
             }
         }
 
-
-
-        private int HandleEncryptedGetNodesRequest(byte[] packet, int length, IPPort source)
-        {
-            try
-            {
-                if (length < 1 + CRYPTO_NONCE_SIZE + 64) return -1; // mínimo para desencriptar
-
-                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
-                byte[] encrypted = new byte[length - 1 - CRYPTO_NONCE_SIZE];
-
-                Buffer.BlockCopy(packet, 1, nonce, 0, CRYPTO_NONCE_SIZE);
-                Buffer.BlockCopy(packet, 1 + CRYPTO_NONCE_SIZE, encrypted, 0, encrypted.Length);
-
-                byte[] decrypted = CryptoBox.Decrypt(encrypted, nonce, SelfPublicKey, SelfSecretKey);
-                if (decrypted == null || decrypted.Length < CRYPTO_PUBLIC_KEY_SIZE * 2) return -1;
-
-                // Extraer public keys: remitente y objetivo de búsqueda
-                byte[] senderPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                byte[] searchPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                Buffer.BlockCopy(decrypted, 0, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-                Buffer.BlockCopy(decrypted, CRYPTO_PUBLIC_KEY_SIZE, searchPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-
-                AddNode(senderPublicKey, source);
-
-                // Obtener nodos más cercanos al objetivo de búsqueda
-                var closestNodes = GetClosestNodes(searchPublicKey, 4);
-                if (closestNodes.Count > 0)
-                {
-                    byte[] response = CreateEncryptedSendNodesPacket(senderPublicKey, closestNodes);
-                    if (response != null)
-                    {
-                        return DHT_send_packet(source, response, response.Length);
-                    }
-                }
-
-                return -1;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error en get_nodes: {ex.Message}");
-                return -1;
-            }
-        }
-
         /// <summary>
-        /// HandleDecryptedGetNodesRequest - Maneja solicitud GET_NODES encriptada
+        /// CreateDhtPongResponse - Crea respuesta PONG encriptada real
         /// </summary>
-        private int HandleDecryptedGetNodesRequest(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
+        private byte[] CreateDhtPongResponse(byte[] destinationPublicKey)
         {
-            if (length < 1 + CRYPTO_PUBLIC_KEY_SIZE * 2) return -1;
-
             try
             {
-                // Extraer public key del solicitante (bytes 1-32)
-                byte[] senderPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
+                // Crear payload PONG: [0x01][nuestra_public_key]
+                byte[] pongPayload = new byte[1 + CRYPTO_PUBLIC_KEY_SIZE];
+                pongPayload[0] = 0x01; // PONG type
+                Buffer.BlockCopy(SelfPublicKey, 0, pongPayload, 1, CRYPTO_PUBLIC_KEY_SIZE);
 
-                // Extraer public key objetivo de búsqueda (bytes 33-64)
-                byte[] targetPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                Buffer.BlockCopy(packet, 1 + CRYPTO_PUBLIC_KEY_SIZE, targetPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-
-                // Verificar que la key del solicitante coincide
-                if (!CryptoVerify.Verify32(senderPublicKey, expectedPublicKey))
-                {
-                    Logger.Log.WarningF($"[{LOG_TAG}] Public key no coincide en get_nodes request");
-                    return -1;
-                }
-
-                // Agregar/actualizar nodo del solicitante
-                AddNode(senderPublicKey, source);
-
-                // Obtener nodos más cercanos al objetivo
-                var closestNodes = GetClosestNodes(targetPublicKey, 4); // 4 nodos como en toxcore
-                if (closestNodes.Count > 0)
-                {
-                    // Enviar respuesta SEND_NODES
-                    byte[] nodesResponse = CreateDhtSendNodesResponse(senderPublicKey, closestNodes);
-                    if (nodesResponse != null)
-                    {
-                        return DHT_send_packet(source, nodesResponse, nodesResponse.Length);
-                    }
-                }
-
-                return -1;
+                // Encriptar el pong
+                return CreateCryptopacket(pongPayload, pongPayload.Length, destinationPublicKey, SelfSecretKey);
             }
             catch (Exception ex)
             {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleDecryptedGetNodesRequest: {ex.Message}");
-                return -1;
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando pong response: {ex.Message}");
+                return null;
             }
         }
 
@@ -955,695 +1255,8 @@ namespace ToxCore.Core
             }
         }
 
-        private int HandleEncryptedSendNodesResponse(byte[] packet, int length, IPPort source)
-        {
-            try
-            {
-                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
-                byte[] encrypted = new byte[length - 1 - CRYPTO_NONCE_SIZE];
-
-                Buffer.BlockCopy(packet, 1, nonce, 0, CRYPTO_NONCE_SIZE);
-                Buffer.BlockCopy(packet, 1 + CRYPTO_NONCE_SIZE, encrypted, 0, encrypted.Length);
-
-                byte[] decrypted = CryptoBox.Decrypt(encrypted, nonce, SelfPublicKey, SelfSecretKey);
-                if (decrypted == null) return -1;
-
-                // Procesar nodos recibidos (cada nodo: 32 + 18 = 50 bytes)
-                int nodeCount = decrypted.Length / 50;
-                for (int i = 0; i < nodeCount; i++)
-                {
-                    int offset = i * 50;
-                    byte[] nodePublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                    byte[] ippBytes = new byte[18];
-
-                    Buffer.BlockCopy(decrypted, offset, nodePublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-                    Buffer.BlockCopy(decrypted, offset + CRYPTO_PUBLIC_KEY_SIZE, ippBytes, 0, 18);
-
-                    IPPort nodeIPPort = BytesToIPPort(ippBytes);
-                    if (nodeIPPort.Port > 0)
-                    {
-                        AddNode(nodePublicKey, nodeIPPort);
-                    }
-                }
-
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error en send_nodes: {ex.Message}");
-                return -1;
-            }
-        }
-
-
         /// <summary>
-        /// HandleDecryptedSendNodesResponse - Maneja respuesta SEND_NODES encriptada
-        /// </summary>
-        private int HandleDecryptedSendNodesResponse(IPPort source, byte[] packet, int length, byte[] expectedPublicKey)
-        {
-            if (length < 1) return -1;
-
-            try
-            {
-                // El payload es: [0x04] + [nodos*(public_key + ipport)]
-                int nodesDataLength = length - 1;
-
-                // Cada nodo ocupa 50 bytes (32 + 18)
-                int nodeCount = nodesDataLength / 50;
-
-                int nodesAdded = 0;
-                for (int i = 0; i < nodeCount; i++)
-                {
-                    int offset = 1 + (i * 50);
-
-                    // Extraer public key del nodo (32 bytes)
-                    byte[] nodePublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                    Buffer.BlockCopy(packet, offset, nodePublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-
-                    // Extraer IPPort (18 bytes)
-                    byte[] ippBytes = new byte[18];
-                    Buffer.BlockCopy(packet, offset + CRYPTO_PUBLIC_KEY_SIZE, ippBytes, 0, 18);
-
-                    IPPort nodeIPPort = BytesToIPPort(ippBytes);
-
-                    // Solo agregar nodos válidos
-                    if (nodeIPPort.Port > 0 && nodeIPPort.IP.Data != null)
-                    {
-                        AddNode(nodePublicKey, nodeIPPort);
-                        nodesAdded++;
-                    }
-                }
-
-                Logger.Log.DebugF($"[{LOG_TAG}] {nodesAdded} nodos agregados desde send_nodes de {source}");
-                return nodesAdded > 0 ? 0 : -1;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error en HandleDecryptedSendNodesResponse: {ex.Message}");
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// DHT_send_packet - Compatible con C original
-        /// </summary>
-        public int DHT_send_packet(IPPort ipp, byte[] packet, int length)
-        {
-            if (Socket == -1) return -1;
-            return Network.socket_send(Socket, packet, length, ipp);
-        }
-
-
-        /// <summary>
-        /// DHT_get_nodes - Compatible con C original
-        /// </summary>
-        public int DHT_get_nodes(byte[] nodes, int length, IPPort ipp)
-        {
-            if (nodes == null || length < 1) return -1;
-
-            try
-            {
-                var closestNodes = GetClosestNodes(SelfPublicKey, MAX_FRIEND_CLOSE);
-                int offset = 0;
-
-                foreach (var node in closestNodes)
-                {
-                    if (offset + 40 > length) break; // 32 + 18 = 50 bytes por nodo
-
-                    // Copiar clave pública
-                    Buffer.BlockCopy(node.PublicKey, 0, nodes, offset, 32);
-                    offset += 32;
-
-                    // Copiar IPPort
-                    byte[] ippBytes = IPPortToBytes(node.EndPoint);
-                    Buffer.BlockCopy(ippBytes, 0, nodes, offset, 18);
-                    offset += 18;
-                }
-
-                return offset; // Total bytes escritos
-            }
-            catch (Exception)
-            {
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// DHT_get_shared_key_recv - Como en DHT.c línea ~1200
-        /// Calcula la shared key para decryptar paquetes entrantes
-        /// </summary>
-        public int DHT_get_shared_key_recv(byte[] sharedKey, byte[] packet, byte[] secretKey)
-        {
-            try
-            {
-                if (sharedKey == null || packet == null || secretKey == null)
-                    return -1;
-
-                // Extraer la public key temporal del remitente (primeros 32 bytes)
-                byte[] tempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                Buffer.BlockCopy(packet, 0, tempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-
-                // Calcular shared key usando crypto_box_beforenm
-                // shared_key = crypto_box_beforenm(temp_public_key, our_secret_key)
-                byte[] calculatedKey = CryptoBox.BeforeNm(tempPublicKey, secretKey);
-                if (calculatedKey == null) return -1;
-
-                Buffer.BlockCopy(calculatedKey, 0, sharedKey, 0, CRYPTO_SYMMETRIC_KEY_SIZE);
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error en DHT_get_shared_key_recv: {ex.Message}");
-                return -1;
-            }
-        }
-
-
-        // ==================== FUNCIONES DE GESTIÓN DE NODOS ====================
-
-        /// <summary>
-        /// Agregar nodo con verificación de duplicados por public key
-        /// </summary>
-        public int AddNode(byte[] publicKey, IPPort endPoint)
-        {
-            if (publicKey == null || publicKey.Length != 32)
-                return -1;
-
-            try
-            {
-                string keyString = BitConverter.ToString(publicKey).Replace("-", "");
-
-                lock (_nodesLock)
-                {
-                    // Buscar nodo existente
-                    var existingNode = _nodes.Find(n =>
-                        n != null &&
-                        n.PublicKey != null &&
-                        ByteArraysEqual(publicKey, n.PublicKey));
-
-                    if (existingNode != null)
-                    {
-                        // Actualizar nodo existente
-                        existingNode.EndPoint = endPoint;
-                        existingNode.LastSeen = DateTime.UtcNow.Ticks;
-                        existingNode.IsActive = true;
-                        return 1;
-                    }
-
-                    // Crear nuevo nodo
-                    var newNode = new DHTNode(publicKey, endPoint);
-                    _nodes.Add(newNode);
-                    _nodesByKey[keyString] = newNode;
-
-                    Logger.Log.DebugF($"[{LOG_TAG}] Nuevo nodo agregado: {endPoint} [Total: {_nodes.Count}]");
-
-                    // Limpieza periódica
-                    if (_nodes.Count > 1000)
-                    {
-                        CleanupOldNodes();
-                    }
-
-                    return 0;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error agregando nodo: {ex.Message}");
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// Limpieza REAL de nodos antiguos - MEJORADO
-        /// </summary>
-        private void CleanupOldNodes()
-        {
-            long cutoffTime = DateTime.UtcNow.Ticks - (TimeSpan.TicksPerMinute * 10);
-            int removed = 0;
-
-            lock (_nodesLock)
-            {
-                for (int i = _nodes.Count - 1; i >= 0; i--)
-                {
-                    var node = _nodes[i];
-                    if (!node.IsActive || node.LastSeen < cutoffTime)
-                    {
-                        string keyString = BitConverter.ToString(node.PublicKey).Replace("-", "");
-                        _nodesByKey.Remove(keyString);
-                        _nodes.RemoveAt(i);
-                        removed++;
-                    }
-                }
-            }
-
-            if (removed > 0)
-            {
-                Logger.Log.DebugF($"[{LOG_TAG}] Limpieza: {removed} nodos removidos");
-            }
-        }
-
-        /// <summary>
-        /// Comparar arrays de bytes de forma segura - MEJORADO
-        /// </summary>
-        private static bool ByteArraysEqual(byte[] a, byte[] b)
-        {
-            if (a == null || b == null || a.Length != b.Length)
-                return false;
-
-            // Usar comparación constante en tiempo para seguridad
-            return CryptoVerify.Verify(a, b);
-        }
-
-
-        /// <summary>
-        /// Versión cacheada de GetClosestNodes - CORREGIDO
-        /// </summary>
-        public List<DHTNode> GetClosestNodesCached(byte[] targetPublicKey, int maxNodes = 8)
-        {
-            string cacheKey = BitConverter.ToString(targetPublicKey).Replace("-", "");
-
-            lock (_cacheLock)
-            {
-                // Limpiar cache periódicamente
-                if (DateTime.UtcNow - _lastCacheCleanup > TimeSpan.FromMinutes(1))
-                {
-                    _closestNodesCache.Clear();
-                    _lastCacheCleanup = DateTime.UtcNow;
-                }
-
-                // Devolver resultado cacheado si existe
-                if (_closestNodesCache.TryGetValue(cacheKey, out var cached) &&
-                    cached != null && cached.Count > 0)
-                {
-                    Logger.Log.TraceF($"[{LOG_TAG}] Cache hit para búsqueda de nodos");
-                    return cached.Count <= maxNodes ? cached : cached.GetRange(0, maxNodes);
-                }
-            }
-
-            // Calcular y cachear resultado
-            var result = GetClosestNodes(targetPublicKey, maxNodes);
-
-            lock (_cacheLock)
-            {
-                _closestNodesCache[cacheKey] = result;
-            }
-
-            return result;
-        }
-
-        
-        /// <summary>
-        /// Obtener nodos más cercanos usando distancia XOR real
-        /// </summary>
-        public List<DHTNode> GetClosestNodes(byte[] targetKey, int maxNodes = MAX_FRIEND_CLOSE)
-        {
-            var result = new List<DHTNode>();
-
-            try
-            {
-                lock (_nodesLock)
-                {
-                    // Calcular distancia XOR para cada nodo activo
-                    var nodesWithDistance = new List<(DHTNode Node, byte[] Distance)>();
-
-                    foreach (var node in _nodes)
-                    {
-                        if (node.IsActive)
-                        {
-                            byte[] distance = CalculateXORDistance(node.PublicKey, targetKey);
-                            nodesWithDistance.Add((node, distance));
-                        }
-                    }
-
-                    // Ordenar por distancia XOR (bytes más significativos primero)
-                    nodesWithDistance.Sort((a, b) => CompareXORDistance(a.Distance, b.Distance));
-
-                    // Tomar los más cercanos
-                    for (int i = 0; i < Math.Min(maxNodes, nodesWithDistance.Count); i++)
-                    {
-                        result.Add(nodesWithDistance[i].Node);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] GetClosestNodes error: {ex.Message}");
-            }
-
-            return result;
-        }
-
-        /// <summary>
-        /// Calcular distancia XOR entre dos claves (Kademlia)
-        /// </summary>
-        private byte[] CalculateXORDistance(byte[] key1, byte[] key2)
-        {
-            byte[] result = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-            for (int i = 0; i < CRYPTO_PUBLIC_KEY_SIZE; i++)
-            {
-                result[i] = (byte)(key1[i] ^ key2[i]);
-            }
-            return result;
-        }
-
-        /// <summary>
-        /// Comparar distancias XOR (para ordenamiento)
-        /// </summary>
-        private int CompareXORDistance(byte[] dist1, byte[] dist2)
-        {
-            for (int i = 0; i < dist1.Length; i++)
-            {
-                if (dist1[i] != dist2[i])
-                    return dist1[i].CompareTo(dist2[i]);
-            }
-            return 0;
-        }
-
-
-        public class ByteArrayComparer : IComparer<byte[]>
-        {
-            public int Compare(byte[] x, byte[] y)
-            {
-                if (x == null && y == null) return 0;
-                if (x == null) return -1;
-                if (y == null) return 1;
-
-                for (int i = 0; i < Math.Min(x.Length, y.Length); i++)
-                {
-                    if (x[i] != y[i])
-                        return x[i].CompareTo(y[i]);
-                }
-                return x.Length.CompareTo(y.Length);
-            }
-        }
-
-        /// <summary>
-        /// Calcular distancia XOR entre dos claves
-        /// </summary>
-        public static byte[] Distance(byte[] key1, byte[] key2)
-        {
-            byte[] result = new byte[32];
-            for (int i = 0; i < 32; i++)
-            {
-                result[i] = (byte)(key1[i] ^ key2[i]);
-            }
-            return result;
-        }
-
-        // ==================== FUNCIONES DE MANEJO DE PAQUETES ====================
-
-        private int HandlePingRequest(byte[] packet, int length, IPPort source)
-        {
-            if (length < 100) return -1;
-
-            try
-            {
-                // Extraer clave pública del remitente
-                byte[] senderPublicKey = new byte[32];
-                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, 32);
-
-                // Agregar nodo a la DHT
-                AddNode(senderPublicKey, source);
-
-                // Enviar respuesta ping
-                byte[] response = CreatePingResponse(senderPublicKey);
-                return DHT_send_packet(source, response, response.Length);
-            }
-            catch (Exception)
-            {
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// Manejar respuesta ping - IMPLEMENTACIÓN REAL
-        /// </summary>
-        private int HandlePingResponse(byte[] packet, int length, IPPort source)
-        {
-            if (length < 100) return -1;
-
-            try
-            {
-                byte[] senderPublicKey = new byte[32];
-                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, 32);
-
-                lock (_nodesLock)
-                {
-                    var node = _nodes.Find(n =>
-                        n.EndPoint.IP.ToString() == source.IP.ToString() &&
-                        n.EndPoint.Port == source.Port &&
-                        ByteArraysEqual(senderPublicKey, n.PublicKey));
-
-                    if (node != null)
-                    {
-                        node.LastSeen = DateTime.UtcNow.Ticks;
-                        node.IsActive = true;
-                        if (node.LastPingSent > 0)
-                        {
-                            node.RTT = (int)((DateTime.UtcNow.Ticks - node.LastPingSent) / TimeSpan.TicksPerMillisecond);
-                        }
-                    }
-                    else
-                    {
-                        // Agregar nodo si no existe
-                        AddNode(senderPublicKey, source);
-                    }
-                }
-
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[DHT] HandlePingResponse error: {ex.Message}");
-                return -1;
-            }
-        }
-
-
-
-        /// <summary>
-        /// Manejar get nodes request - IMPLEMENTACIÓN REAL
-        /// </summary>
-        private int HandleGetNodesRequest(byte[] packet, int length, IPPort source)
-        {
-            if (length < 67) return -1; // Mínimo 67 bytes para este paquete
-
-            try
-            {
-                byte[] senderPublicKey = new byte[32];
-                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, 32);
-
-                byte[] targetKey = new byte[32];
-                Buffer.BlockCopy(packet, 33, targetKey, 0, 32);
-
-                // Agregar nodo a la DHT
-                AddNode(senderPublicKey, source);
-
-                // Obtener nodos más cercanos al objetivo
-                var closestNodes = GetClosestNodes(targetKey, 4);
-
-                // Enviar respuesta
-                byte[] response = CreateNodesResponse(senderPublicKey, closestNodes);
-                return DHT_send_packet(source, response, response.Length);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[DHT] HandleGetNodesRequest error: {ex.Message}");
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// Manejar nodes response - IMPLEMENTACIÓN REAL
-        /// </summary>
-        private int HandleNodesResponse(byte[] packet, int length, IPPort source)
-        {
-            if (length < 33) return -1;
-
-            try
-            {
-                byte[] senderPublicKey = new byte[32];
-                Buffer.BlockCopy(packet, 1, senderPublicKey, 0, 32);
-
-                // Procesar nodos recibidos
-                int nodesDataLength = length - 33;
-                int nodeCount = nodesDataLength / 50; // 50 bytes por nodo
-
-                for (int i = 0; i < nodeCount; i++)
-                {
-                    int offset = 33 + (i * 50);
-
-                    byte[] nodePublicKey = new byte[32];
-                    Buffer.BlockCopy(packet, offset, nodePublicKey, 0, 32);
-
-                    byte[] ippBytes = new byte[18];
-                    Buffer.BlockCopy(packet, offset + 32, ippBytes, 0, 18);
-
-                    IPPort nodeIPPort = BytesToIPPort(ippBytes);
-
-                    // Solo agregar nodos válidos
-                    if (nodeIPPort.Port > 0 && nodeIPPort.IP.Data != null)
-                    {
-                        AddNode(nodePublicKey, nodeIPPort);
-                    }
-                }
-
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[DHT] HandleNodesResponse error: {ex.Message}");
-                return -1;
-            }
-        }
-
-        // ==================== FUNCIONES DE CREACIÓN DE PAQUETES ====================
-
-        /// <summary>
-        /// Crear ping request - IMPLEMENTACIÓN REAL SIMPLIFICADA
-        /// </summary>
-        private byte[] CreatePingRequest(byte[] targetPublicKey)
-        {
-            // En toxcore real, esto usa encriptación CryptoBox
-            // Para la prueba, creamos un paquete básico sin encriptar
-            byte[] packet = new byte[100];
-
-            // Header: tipo de paquete (0x00 = ping request)
-            packet[0] = 0x00;
-
-            // Nuestra clave pública (32 bytes)
-            Buffer.BlockCopy(SelfPublicKey, 0, packet, 1, 32);
-
-            // Clave pública objetivo (32 bytes)  
-            Buffer.BlockCopy(targetPublicKey, 0, packet, 33, 32);
-
-            // Timestamp (8 bytes)
-            byte[] timestamp = BitConverter.GetBytes(DateTime.UtcNow.Ticks);
-            Buffer.BlockCopy(timestamp, 0, packet, 65, 8);
-
-            // Nonce (27 bytes)
-            byte[] nonce = RandomBytes.Generate(27);
-            Buffer.BlockCopy(nonce, 0, packet, 73, 27);
-
-            return packet;
-        }
-
-        /// <summary>
-        /// Crear ping response - IMPLEMENTACIÓN REAL SIMPLIFICADA
-        /// </summary>
-        private byte[] CreatePingResponse(byte[] targetPublicKey)
-        {
-            byte[] packet = new byte[100];
-
-            // Header: tipo de paquete (0x01 = ping response)
-            packet[0] = 0x01;
-
-            // Nuestra clave pública (32 bytes)
-            Buffer.BlockCopy(SelfPublicKey, 0, packet, 1, 32);
-
-            // Clave pública del solicitante (32 bytes)
-            Buffer.BlockCopy(targetPublicKey, 0, packet, 33, 32);
-
-            // Timestamp de respuesta (8 bytes)
-            byte[] timestamp = BitConverter.GetBytes(DateTime.UtcNow.Ticks);
-            Buffer.BlockCopy(timestamp, 0, packet, 65, 8);
-
-            // Nonce (27 bytes)
-            byte[] nonce = RandomBytes.Generate(27);
-            Buffer.BlockCopy(nonce, 0, packet, 73, 27);
-
-            return packet;
-        }
-
-        /// <summary>
-        /// Crea un paquete ping REAL encriptado con CryptoBox
-        /// </summary>
-        private byte[] CreateEncryptedPingPacket(byte[] targetPublicKey)
-        {
-            try
-            {
-                // Datos del ping (timestamp + ping ID + información de handshake)
-                byte[] pingData = new byte[16 + CRYPTO_PUBLIC_KEY_SIZE];
-                byte[] timestamp = BitConverter.GetBytes(DateTime.UtcNow.Ticks);
-                byte[] pingIdBytes = BitConverter.GetBytes(_lastPingID++);
-
-                Buffer.BlockCopy(timestamp, 0, pingData, 0, 8);
-                Buffer.BlockCopy(pingIdBytes, 0, pingData, 8, 4);
-
-                // ✅ INCLUIR nuestra public key temporal para facilitar handshake
-                EnsureTempKeys();
-                Buffer.BlockCopy(_currentTempPublicKey, 0, pingData, 12, CRYPTO_PUBLIC_KEY_SIZE);
-
-                // Nonce aleatorio
-                byte[] nonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
-
-                // Encriptar con CryptoBox
-                byte[] encrypted = CryptoBox.Encrypt(pingData, nonce, targetPublicKey, SelfSecretKey);
-                if (encrypted == null) return null;
-
-                // Construir paquete: [nonce(24)][encrypted_data]
-                byte[] packet = new byte[CRYPTO_NONCE_SIZE + encrypted.Length];
-                Buffer.BlockCopy(nonce, 0, packet, 0, CRYPTO_NONCE_SIZE);
-                Buffer.BlockCopy(encrypted, 0, packet, CRYPTO_NONCE_SIZE, encrypted.Length);
-
-                return packet;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando ping encriptado: {ex.Message}");
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Procesa un paquete ping REAL encriptado
-        /// </summary>
-        private bool HandleEncryptedPingPacket(byte[] packet, int length, IPPort source, out byte[] senderPublicKey)
-        {
-            senderPublicKey = null;
-
-            if (length < CRYPTO_NONCE_SIZE + 16) // nonce + datos mínimos
-                return false;
-
-            try
-            {
-                // Extraer nonce y datos encriptados
-                byte[] nonce = new byte[CRYPTO_NONCE_SIZE];
-                byte[] encrypted = new byte[length - CRYPTO_NONCE_SIZE];
-
-                Buffer.BlockCopy(packet, 0, nonce, 0, CRYPTO_NONCE_SIZE);
-                Buffer.BlockCopy(packet, CRYPTO_NONCE_SIZE, encrypted, 0, encrypted.Length);
-
-                // Intentar desencriptar con nuestra clave secreta
-                byte[] decrypted = CryptoBox.Decrypt(encrypted, nonce, SelfPublicKey, SelfSecretKey);
-                if (decrypted == null || decrypted.Length < 12)
-                    return false;
-
-                // ✅ IMPLEMENTACIÓN REAL: Extraer información de handshake si está presente
-                if (decrypted.Length >= 12 + CRYPTO_PUBLIC_KEY_SIZE)
-                {
-                    // El ping incluye public key temporal del remitente
-                    byte[] peerTempPublicKey = new byte[CRYPTO_PUBLIC_KEY_SIZE];
-                    Buffer.BlockCopy(decrypted, 12, peerTempPublicKey, 0, CRYPTO_PUBLIC_KEY_SIZE);
-
-                    Logger.Log.DebugF($"[{LOG_TAG}] Ping con handshake info de {source}");
-
-                    // Podríamos usar esta info para iniciar handshake más eficientemente
-                    // Por ahora, simplemente aceptamos el ping
-                    return true;
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error procesando ping encriptado: {ex.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Crea paquete get_nodes REAL encriptado
+        /// CreateEncryptedGetNodesPacket - Crea get_nodes request encriptado
         /// </summary>
         private byte[] CreateEncryptedGetNodesPacket(byte[] targetPublicKey, byte[] searchPublicKey)
         {
@@ -1672,108 +1285,36 @@ namespace ToxCore.Core
             }
         }
 
+        // ===== GESTIÓN DE NODOS KADEMLIA =====
+
         /// <summary>
-        /// Crea respuesta send_nodes REAL encriptada
+        /// Agregar nodo a la tabla Kademlia
         /// </summary>
-        private byte[] CreateEncryptedSendNodesPacket(byte[] targetPublicKey, List<DHTNode> nodes)
+        public int AddNode(byte[] publicKey, IPPort endPoint)
         {
+            if (publicKey?.Length != CRYPTO_PUBLIC_KEY_SIZE)
+                return -1;
+
             try
             {
-                // Serializar nodos (cada nodo: public_key(32) + ip_port(18))
-                int nodesDataSize = nodes.Count * (CRYPTO_PUBLIC_KEY_SIZE + 18);
-                byte[] nodesData = new byte[nodesDataSize];
-                int offset = 0;
+                var node = new DHTNode(publicKey, endPoint);
+                bool added = routingTable.AddNode(node);
 
-                foreach (var node in nodes)
+                if (added)
                 {
-                    Buffer.BlockCopy(node.PublicKey, 0, nodesData, offset, CRYPTO_PUBLIC_KEY_SIZE);
-                    offset += CRYPTO_PUBLIC_KEY_SIZE;
-
-                    byte[] ippBytes = IPPortToBytes(node.EndPoint);
-                    Buffer.BlockCopy(ippBytes, 0, nodesData, offset, 18);
-                    offset += 18;
+                    Logger.Log.DebugF($"[{LOG_TAG}] Nodo agregado a Kademlia: {endPoint}");
                 }
 
-                byte[] nonce = RandomBytes.Generate(CRYPTO_NONCE_SIZE);
-                byte[] encrypted = CryptoBox.Encrypt(nodesData, nonce, targetPublicKey, SelfSecretKey);
-                if (encrypted == null) return null;
-
-                byte[] packet = new byte[1 + CRYPTO_NONCE_SIZE + encrypted.Length];
-                packet[0] = 0x04; // SEND_NODES packet type
-                Buffer.BlockCopy(nonce, 0, packet, 1, CRYPTO_NONCE_SIZE);
-                Buffer.BlockCopy(encrypted, 0, packet, 1 + CRYPTO_NONCE_SIZE, encrypted.Length);
-
-                return packet;
+                return added ? 0 : 1; // 0 = nuevo, 1 = actualizado
             }
             catch (Exception ex)
             {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando send_nodes encriptado: {ex.Message}");
-                return null;
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error agregando nodo: {ex.Message}");
+                return -1;
             }
         }
 
-
-
-
-
-        /// <summary>
-        /// Crear get nodes request - IMPLEMENTACIÓN REAL
-        /// </summary>
-        private byte[] CreateGetNodesRequest(byte[] targetPublicKey)
-        {
-            byte[] packet = new byte[100];
-
-            // Header: tipo de paquete (0x02 = get nodes request)
-            packet[0] = 0x02;
-
-            // Nuestra clave pública (32 bytes)
-            Buffer.BlockCopy(SelfPublicKey, 0, packet, 1, 32);
-
-            // Clave pública objetivo para la búsqueda (32 bytes)
-            Buffer.BlockCopy(targetPublicKey, 0, packet, 33, 32);
-
-            // Random padding (35 bytes)
-            byte[] padding = RandomBytes.Generate(35);
-            Buffer.BlockCopy(padding, 0, packet, 65, 35);
-
-            return packet;
-        }
-
-        /// <summary>
-        /// Crear nodes response - IMPLEMENTACIÓN REAL
-        /// </summary>
-        private byte[] CreateNodesResponse(byte[] targetPublicKey, List<DHTNode> nodes)
-        {
-            // Calcular tamaño del paquete: 33 bytes header + (50 bytes por nodo)
-            int nodeCount = Math.Min(nodes.Count, 4); // Máximo 4 nodos por respuesta
-            int packetSize = 33 + (nodeCount * 50);
-            byte[] packet = new byte[packetSize];
-
-            // Header: tipo de paquete (0x04 = send nodes response)
-            packet[0] = 0x04;
-
-            // Nuestra clave pública (32 bytes)
-            Buffer.BlockCopy(SelfPublicKey, 0, packet, 1, 32);
-
-            int offset = 33;
-            for (int i = 0; i < nodeCount; i++)
-            {
-                var node = nodes[i];
-
-                // Clave pública del nodo (32 bytes)
-                Buffer.BlockCopy(node.PublicKey, 0, packet, offset, 32);
-                offset += 32;
-
-                // IPPort del nodo (18 bytes)
-                byte[] ippBytes = IPPortToBytes(node.EndPoint);
-                Buffer.BlockCopy(ippBytes, 0, packet, offset, 18);
-                offset += 18;
-            }
-
-            return packet;
-        }
-
-        // ==================== FUNCIONES AUXILIARES ====================
+        // ===== FUNCIONES AUXILIARES =====
 
         /// <summary>
         /// IPPortToBytes - Convierte IPPort a array de bytes (18 bytes)
@@ -1845,182 +1386,222 @@ namespace ToxCore.Core
             }
         }
 
-        // ==================== FUNCIONES DE MANTENIMIENTO ====================
+        /// <summary>
+        /// Comparación segura de arrays de bytes
+        /// </summary>
+        private static bool ByteArraysEqual(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length)
+                return false;
 
-        ////// <summary>
-        /// Ejecutar mantenimiento periódico de la DHT - VERSIÓN CORREGIDA
+            return CryptoVerify.Verify(a, b);
+        }
+
+        // ===== MANTENIMIENTO Y LIMPIEZA KADEMLIA =====
+
+        /// <summary>
+        /// Manejo de handshakes pendientes
+        /// </summary>
+        private DHTHandshake? FindHandshakeByTempKey(byte[] tempPublicKey, IPPort endPoint)
+        {
+            string targetKey = $"{endPoint}_{BitConverter.ToString(tempPublicKey).Replace("-", "").Substring(0, 16)}";
+
+            lock (handshakesLock)
+            {
+                if (activeHandshakes.TryGetValue(targetKey, out var handshake))
+                {
+                    return handshake;
+                }
+            }
+            return null;
+        }
+
+        private void RemoveHandshake(byte[] tempPublicKey, IPPort endPoint)
+        {
+            string handshakeKey = $"{endPoint}_{BitConverter.ToString(tempPublicKey).Replace("-", "").Substring(0, 16)}";
+
+            lock (handshakesLock)
+            {
+                activeHandshakes.Remove(handshakeKey);
+            }
+        }
+
+        /// <summary>
+        /// Limpia handshakes expirados
+        /// </summary>
+        private void CleanupExpiredHandshakes()
+        {
+            long cutoffTime = DateTime.UtcNow.Ticks - TimeSpan.TicksPerMillisecond * 30000; // 30 segundos
+            int removed = 0;
+
+            lock (handshakesLock)
+            {
+                var expiredKeys = new List<string>();
+
+                foreach (var kvp in activeHandshakes)
+                {
+                    if (kvp.Value.CreationTime < cutoffTime)
+                    {
+                        expiredKeys.Add(kvp.Key);
+                    }
+                }
+
+                foreach (var key in expiredKeys)
+                {
+                    activeHandshakes.Remove(key);
+                    removed++;
+                }
+            }
+
+            if (removed > 0)
+            {
+                Logger.Log.DebugF($"[{LOG_TAG}] {removed} handshakes expirados removidos");
+            }
+        }
+
+        /// <summary>
+        /// DoPeriodicWork - Mantenimiento periódico completo Kademlia
         /// </summary>
         public void DoPeriodicWork()
         {
             try
             {
-                CleanupOldNodes();
-                CleanupExpiredHandshakes();
-
-                EnsureTempKeys();
-
                 long currentTime = DateTime.UtcNow.Ticks;
 
-                // CORREGIR: Usar índices en lugar de enumeración
-                lock (_nodesLock)
+                // 1. Limpieza de handshakes expirados
+                CleanupExpiredHandshakes();
+
+                // 2. Limpieza de buckets Kademlia
+                int removed = routingTable.CleanupAllBuckets();
+                if (removed > 0)
                 {
-                    for (int i = 0; i < _nodes.Count; i++)
-                    {
-                        var node = _nodes[i];
-                        if (node.IsActive &&
-                            (currentTime - node.LastSeen) > TimeSpan.TicksPerSecond * 60)
-                        {
-                            // Marcar como inactivo directamente
-                            node.IsActive = false;
-                        }
-                    }
+                    Logger.Log.DebugF($"[{LOG_TAG}] Limpieza Kademlia: {removed} nodos removidos");
                 }
 
-                // Re-bootstrap periódicamente
-                if ((currentTime - _lastBootstrapTime) > TimeSpan.TicksPerSecond * 300)
+                // 3. Refresco de buckets que necesitan actualización
+                var bucketsNeedingRefresh = routingTable.GetBucketsNeedingRefresh();
+                foreach (int bucketIndex in bucketsNeedingRefresh)
                 {
-                    foreach (var bootstrapNode in _bootstrapNodes)
+                    RefreshBucket(bucketIndex);
+                }
+
+                // 4. Re-bootstrap periódico
+                if ((currentTime - lastBootstrapTime) > TimeSpan.TicksPerSecond * 300) // 5 minutos
+                {
+                    foreach (var bootstrapNode in bootstrapNodes)
                     {
                         DHT_bootstrap(bootstrapNode.IPPort, bootstrapNode.PublicKey);
                     }
-                    _lastBootstrapTime = currentTime;
+                    lastBootstrapTime = currentTime;
                 }
 
-                if ((currentTime - _lastLogTime) > TimeSpan.TicksPerSecond * 30)
+                // 5. Logging periódico
+                if ((currentTime - lastLogTime) > TimeSpan.TicksPerSecond * 30) // 30 segundos
                 {
-                    Logger.Log.DebugF($"[{LOG_TAG}] Estadísticas - Nodos: {TotalNodes}, Activos: {ActiveNodes}");
-                    _lastLogTime = currentTime;
+                    var allNodes = routingTable.GetAllNodes();
+                    int activeCount = allNodes.Count(n => n.IsActive);
+                    Logger.Log.DebugF($"[{LOG_TAG}] Kademlia Stats - Total: {allNodes.Count}, Activos: {activeCount}, Buckets: {GetActiveBucketCount()}");
+                    lastLogTime = currentTime;
                 }
+
+                // 6. Rotación de claves temporales
+                EnsureTempKeys();
 
             }
             catch (Exception ex)
             {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error en trabajo periódico: {ex.Message}");
-            }
-        }
-
-        private void SimpleCleanup()
-        {
-            if (DateTime.UtcNow - _lastCleanup < TimeSpan.FromMinutes(2))
-                return;
-
-            try
-            {
-                lock (_nodesLock)
-                {
-                    // Limpieza simple - solo marcar como inactivos, no remover
-                    foreach (var node in _nodes)
-                    {
-                        if (!node.IsActive)
-                        {
-                            // Ya está inactivo, no hacer nada
-                        }
-                    }
-                }
-                _lastCleanup = DateTime.UtcNow;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.WarningF($"[{LOG_TAG}] Error en limpieza simple: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error en trabajo periódico Kademlia: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Limpieza mínima y segura - solo marca nodos, no los remueve
+        /// Refresca un bucket Kademlia específico
         /// </summary>
-        private void SafeCleanup()
+        private void RefreshBucket(int bucketIndex)
         {
-            long currentTime = DateTime.UtcNow.Ticks;
-
-            // Solo ejecutar cada 2 minutos
-            if (currentTime - _lastCleanupTime < TimeSpan.TicksPerMinute * 2)
-                return;
-
             try
             {
-                int markedInactive = 0;
-                lock (_nodesLock)
+                // Generar un ID aleatorio que caiga en este bucket
+                byte[] randomId = GenerateRandomIdForBucket(bucketIndex);
+
+                // Hacer búsqueda de nodos para este ID
+                var closestNodes = routingTable.FindClosestNodes(randomId, ALPHA);
+
+                foreach (var node in closestNodes)
                 {
-                    // Solo marcar nodos como inactivos, no remover
-                    foreach (var node in _nodes)
+                    // Enviar get_nodes request
+                    byte[] requestPacket = CreateEncryptedGetNodesPacket(node.PublicKey, randomId);
+                    if (requestPacket != null)
                     {
-                        // Usar comparación con ticks (compatible con tu código)
-                        long inactiveThreshold = currentTime - TimeSpan.TicksPerHour;
-                        if (node.IsActive && node.LastSeen < inactiveThreshold)
-                        {
-                            node.IsActive = false;
-                            markedInactive++;
-                        }
+                        DHT_send_packet(node.EndPoint, requestPacket, requestPacket.Length);
                     }
                 }
 
-                if (markedInactive > 0)
-                {
-                    Logger.Log.DebugF($"[{LOG_TAG}] Limpieza segura - Nodos marcados inactivos: {markedInactive}");
-                }
-
-                _lastCleanupTime = currentTime;
+                Logger.Log.DebugF($"[{LOG_TAG}] Bucket {bucketIndex} refrescado");
             }
             catch (Exception ex)
             {
-                Logger.Log.WarningF($"[{LOG_TAG}] Error en limpieza segura: {ex.Message}");
-            }
-        }
-
-
-        /// <summary>
-        /// Optimización: Limpieza periódica de nodos inactivos
-        /// </summary>
-        private void OptimizedCleanup()
-        {
-            if (DateTime.UtcNow - _lastCleanup < _cleanupInterval)
-                return;
-
-            try
-            {
-                lock (_nodesLock)
-                {
-                    int initialCount = _nodes.Count;
-
-                    // Usar ticks para comparación (compatible con tu código)
-                    long cutoffTime = DateTime.UtcNow.AddHours(-1).Ticks;
-
-                    _nodes.RemoveAll(node =>
-                        !node.IsActive &&
-                        node.LastSeen < cutoffTime);
-
-                    int removed = initialCount - _nodes.Count;
-                    if (removed > 0)
-                    {
-                        Logger.Log.DebugF($"[{LOG_TAG}] Limpieza optimizada - Nodos removidos: {removed}");
-                    }
-                }
-
-                _lastCleanup = DateTime.UtcNow;
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.WarningF($"[{LOG_TAG}] Error en limpieza optimizada: {ex.Message}");
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error refrescando bucket {bucketIndex}: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Versión optimizada de DoPeriodicWork
+        /// Genera un ID aleatorio que caiga en un bucket específico
         /// </summary>
-        public void DoPeriodicWorkOptimized()
+        private byte[] GenerateRandomIdForBucket(int bucketIndex)
         {
-            try
-            {
-                // 1. Limpieza optimizada
-                OptimizedCleanup();
+            byte[] randomId = new byte[CRYPTO_PUBLIC_KEY_SIZE];
+            RandomNumberGenerator.Fill(randomId);
 
-                // 2. Procesamiento normal (usando tu implementación actual)
-                DoPeriodicWork();
-            }
-            catch (Exception ex)
+            // Asegurar que el ID caiga en el bucket deseado
+            if (bucketIndex > 0)
             {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error en trabajo periódico optimizado: {ex.Message}");
+                int byteIndex = bucketIndex / 8;
+                int bitIndex = bucketIndex % 8;
+
+                // Forzar el bit en la posición correcta
+                if (byteIndex < randomId.Length)
+                {
+                    byte mask = (byte)(1 << (7 - bitIndex));
+                    randomId[byteIndex] = (byte)((randomId[byteIndex] & ~mask) | mask);
+                }
             }
+
+            return randomId;
+        }
+
+        /// <summary>
+        /// Obtiene el número de buckets activos
+        /// </summary>
+        private int GetActiveBucketCount()
+        {
+            int activeCount = 0;
+            for (int i = 0; i < 256; i++)
+            {
+                if (routingTable.FindClosestNodes(SelfPublicKey, 1).Count > 0)
+                {
+                    activeCount++;
+                }
+            }
+            return activeCount;
+        }
+
+        // ===== FUNCIONES DE UTILIDAD =====
+
+        /// <summary>
+        /// Obtiene nodos más cercanos (versión cacheada para compatibilidad)
+        /// </summary>
+        public List<DHTNode> GetClosestNodesCached(byte[] targetPublicKey, int maxNodes = 8)
+        {
+            return routingTable.FindClosestNodes(targetPublicKey, maxNodes);
+        }
+
+        /// <summary>
+        /// Obtiene nodos más cercanos usando Kademlia
+        /// </summary>
+        public List<DHTNode> GetClosestNodes(byte[] targetKey, int maxNodes = MAX_FRIEND_CLOSE)
+        {
+            return routingTable.FindClosestNodes(targetKey, maxNodes);
         }
 
         /// <summary>
@@ -2034,28 +1615,25 @@ namespace ToxCore.Core
                 Socket = -1;
             }
 
-            lock (_nodesLock)
-            {
-                _nodes.Clear();
-            }
-            _bootstrapNodes.Clear();
+            bootstrapNodes.Clear();
+            activeHandshakes.Clear();
         }
 
-        // ==================== FUNCIONES DE ESTADÍSTICAS ====================
-
+        /// <summary>
+        /// Imprime estadísticas de Kademlia
+        /// </summary>
         public void PrintStatistics()
         {
-            Console.WriteLine($"[DHT] Statistics:");
-            Console.WriteLine($"  Total Nodes: {TotalNodes}");
-            Console.WriteLine($"  Active Nodes: {ActiveNodes}");
-            Console.WriteLine($"  Bootstrap Nodes: {_bootstrapNodes.Count}");
-            Console.WriteLine($"  Socket: {(Socket == -1 ? "Closed" : "Open")}");
+            var allNodes = routingTable.GetAllNodes();
+            int activeCount = allNodes.Count(n => n.IsActive);
+            int bucketCount = GetActiveBucketCount();
+
+            Console.WriteLine($"[DHT Kademlia] Statistics:");
+            Console.WriteLine($" Total Nodes: {allNodes.Count}");
+            Console.WriteLine($" Active Nodes: {activeCount}");
+            Console.WriteLine($" Active Buckets: {bucketCount}");
+            Console.WriteLine($" Bootstrap Nodes: {bootstrapNodes.Count}");
+            Console.WriteLine($" Socket: {(Socket == -1 ? "Closed" : "Open")}");
         }
     }
-
-
-    
-
-
 }
-

@@ -106,6 +106,11 @@ namespace ToxCore.Core
         private const string LOG_TAG = "ONION";
         private long _lastLogTime = 0;
 
+        public Messenger Messenger { get; private set; }
+
+        public OnionAnnounce Announce { get; private set; }
+        public OnionData Data { get; private set; }
+
         public const int ONION_MAX_PACKET_SIZE = 1400;
         public const int ONION_RETURN_SIZE = 128;
         public const int ONION_PATH_LENGTH = 3;
@@ -123,7 +128,7 @@ namespace ToxCore.Core
         public bool IsRunning { get; private set; }
 
         private readonly List<OnionNode> _onionNodes;
-        private readonly List<OnionPath> _onionPaths;
+        public readonly List<OnionPath> _onionPaths;
         private readonly object _nodesLock = new object();
         private readonly object _pathsLock = new object();
         private int _lastPathNumber;
@@ -155,7 +160,7 @@ namespace ToxCore.Core
             }
         }
 
-        public Onion(byte[] selfPublicKey, byte[] selfSecretKey, DHT dht = null)
+        public Onion(byte[] selfPublicKey, byte[] selfSecretKey, DHT dht = null, Messenger messenger = null)
         {
             SelfPublicKey = new byte[32];
             SelfSecretKey = new byte[32];
@@ -164,13 +169,20 @@ namespace ToxCore.Core
 
             _onionNodes = new List<OnionNode>();
             _onionPaths = new List<OnionPath>();
+            
+
             _lastPathNumber = 0;
             _lastMaintenanceTime = DateTime.UtcNow.Ticks;
             IsRunning = false;
             _dht = dht;
+            Messenger = messenger;
+
+            Announce = new OnionAnnounce();
+            Data = new OnionData(this);
 
             Socket = Network.new_socket(2, 2, 17);
             Logger.Log.InfoF($"[{LOG_TAG}] Onion inicializado - Socket: {Socket}");
+            
         }
 
         // ==================== FUNCIONES COMPATIBLES CON C ORIGINAL ====================
@@ -254,7 +266,7 @@ namespace ToxCore.Core
         /// SelectOptimalOnionPath - Selección REAL de paths como en onion.c
         /// Considera RTT, estabilidad, capacidad de nodos
         /// </summary>
-        private OnionPath SelectOptimalOnionPath()
+        public OnionPath SelectOptimalOnionPath()
         {
             try
             {
@@ -558,7 +570,7 @@ namespace ToxCore.Core
         /// <summary>
         /// Crea un paquete onion REAL con encriptación en capas
         /// </summary>
-        private byte[] CreateOnionPacket(byte[] plainData, int length, byte[] destPublicKey, OnionPath path)
+        public byte[] CreateOnionPacket(byte[] plainData, int length, byte[] destPublicKey, OnionPath path)
         {
             try
             {
@@ -629,45 +641,38 @@ namespace ToxCore.Core
         /// </summary>
         public int HandleOnionPacket(byte[] packet, int length, IPPort source)
         {
-            if (!IsRunning || packet == null || length < 25) // mínimo: nonce(24) + algo de data
-                return -1;
+            if (packet == null || length < 25) return -1;
 
             try
             {
-                // Extraer nonce y datos encriptados
+                // 1. Extraer nonce y datos encriptados
                 byte[] nonce = new byte[24];
                 byte[] encrypted = new byte[length - 24];
-
                 Buffer.BlockCopy(packet, 0, nonce, 0, 24);
                 Buffer.BlockCopy(packet, 24, encrypted, 0, encrypted.Length);
 
-                // Intentar desencriptar con nuestra clave
+                // 2. Desencriptar con nuestra clave
                 byte[] decrypted = CryptoBox.Decrypt(encrypted, nonce, SelfPublicKey, SelfSecretKey);
-                if (decrypted == null || decrypted.Length < 32)
-                {
-                    Logger.Log.DebugF($"[{LOG_TAG}] Paquete onion no pudo ser desencriptado");
-                    return -1;
-                }
+                if (decrypted == null || decrypted.Length < 32) return -1;
 
-                // Extraer siguiente public key y datos
+                // 3. Extraer siguiente public key y datos
                 byte[] nextPublicKey = new byte[32];
                 byte[] innerData = new byte[decrypted.Length - 32];
-
                 Buffer.BlockCopy(decrypted, 0, nextPublicKey, 0, 32);
                 Buffer.BlockCopy(decrypted, 32, innerData, 0, innerData.Length);
 
-                // Actualizar nodo onion
+                // 4. Actualizar nodo onion
                 UpdateOnionNode(source, nextPublicKey);
 
+                // 5. ¿Somos el destino final?
                 if (IsZeroKey(nextPublicKey))
                 {
-                    // ✅ Llegamos al destino final
-                    Logger.Log.DebugF($"[{LOG_TAG}] Paquete onion llegó a destino final");
-                    return ProcessFinalOnionPacket(innerData, innerData.Length, source);
+                    // ✅ Llamada correcta: pasamos el publicKey del nodo que nos envió (source)
+                    return Data.HandleDataPacket(innerData, innerData.Length, source, nextPublicKey);
                 }
                 else
                 {
-                    // ✅ Reenviar al siguiente nodo
+                    // Reenviar al siguiente nodo
                     return ForwardOnionPacket(innerData, innerData.Length, nextPublicKey);
                 }
             }
@@ -692,21 +697,12 @@ namespace ToxCore.Core
                     return -1;
                 }
 
-                // Enviar paquete al siguiente nodo
                 int sent = Network.socket_send(Socket, data, length, nextNode.IPPort);
 
                 if (sent > 0)
-                {
-                    // ✅ REGISTRAR MÉTRICA DE ÉXITO
                     nextNode.RecordSuccessfulForward();
-                    Logger.Log.TraceF($"[{LOG_TAG}] Paquete onion reenviado a {nextNode.IPPort} (Success: {nextNode.SuccessRate}%)");
-                }
                 else
-                {
-                    // ✅ REGISTRAR MÉTRICA DE FALLO
                     nextNode.RecordFailedForward();
-                    Logger.Log.WarningF($"[{LOG_TAG}] Falló reenvío a {nextNode.IPPort} (Success: {nextNode.SuccessRate}%)");
-                }
 
                 return sent;
             }
@@ -860,7 +856,7 @@ namespace ToxCore.Core
         /// <summary>
         /// IsGoodOnionNode - Verificación REAL de nodos onion como en onion.c
         /// </summary>
-        private bool IsGoodOnionNode(DHTNode node)
+        private bool IsGoodOnionNode(DHT.DHTNode node)
         {
             if (node == null || !node.IsActive) return false;
 

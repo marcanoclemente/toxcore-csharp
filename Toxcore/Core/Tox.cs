@@ -10,6 +10,9 @@ namespace ToxCore.Core
     public class Tox : IDisposable
     {
         private const string LOG_TAG = "TOX";
+        
+        // ✅ Persistencia automática
+        private string _stateFilePath;
 
         // Componentes principales
         private Messenger _messenger;
@@ -542,6 +545,40 @@ namespace ToxCore.Core
         }
 
         /// <summary>
+        /// Inicia Tox con persistencia automática (carga y guarda estado)
+        /// </summary>
+        /// </summary>
+        public bool Start(string stateFilePath = "tox.state")
+        {
+            _stateFilePath = stateFilePath;
+
+            if (!Start())
+                return false;
+
+            // ✅ Cargar estado básico si existe
+            if (File.Exists(stateFilePath))
+            {
+                _messenger?.LoadState(stateFilePath);
+
+                // ✅ Restaurar solo componentes críticos sin errores de compilación
+                var runtime = _messenger?.State?.Runtime;
+                if (runtime?.KnownDHTNodes != null && _messenger?.Dht != null)
+                {
+                    foreach (var node in runtime.KnownDHTNodes)
+                    {
+                        _messenger.Dht.AddNode(node.PublicKey, node.EndPoint);
+                    }
+                    Logger.Log.InfoF($"[{LOG_TAG}] {runtime.KnownDHTNodes.Count} nodos DHT restaurados");
+                }
+            }
+
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => SaveState();
+            Console.CancelKeyPress += (_, _) => SaveState();
+
+            return true;
+        }
+
+        /// <summary>
         /// Detener cliente Tox
         /// </summary>
         public void Stop()
@@ -560,6 +597,49 @@ namespace ToxCore.Core
             catch (Exception ex)
             {
                 Logger.Log.ErrorF($"[{LOG_TAG}] Error deteniendo cliente Tox: {ex.Message}");
+            }
+        }
+
+
+        /// <summary>
+        /// Guarda el estado actual automáticamente
+        /// </summary>
+        public bool SaveState()
+        {
+            if (string.IsNullOrEmpty(_stateFilePath))
+                return false;
+
+            if (_messenger?.State?.Runtime == null)
+                return false;
+
+            try
+            {
+                // ✅ CORREGIDO: Guardar nodos DHT (acceder a través de Messenger)
+                if (_messenger.Dht != null)
+                {
+                    var activeNodes = _messenger.Dht.GetClosestNodes(_messenger.State.User.PublicKey, 200);
+                    _messenger.State.Runtime.KnownDHTNodes = activeNodes ?? new List<DHT.DHTNode>();
+                    Logger.Log.DebugF($"[{LOG_TAG}] Guardando {_messenger.State.Runtime.KnownDHTNodes.Count} nodos DHT");
+                }
+                else
+                {
+                    _messenger.State.Runtime.KnownDHTNodes = new List<DHT.DHTNode>();
+                }
+
+                // ✅ CORREGIDO: Para otros componentes, inicializar listas vacías por ahora
+                // (Puedes implementarlos más adelante cuando resuelvas las APIs)
+                _messenger.State.Runtime.ActiveFileTransfers = new List<EnhancedFileTransfer>();
+                _messenger.State.Runtime.LanPeers = new List<DiscoveredPeer>();
+                _messenger.State.Runtime.OnionPaths = new List<OnionPath>();
+                _messenger.State.Runtime.TcpTunnels = new List<TCPTunnelConnection>();
+
+                Logger.Log.InfoF($"[{LOG_TAG}] Guardando estado en: {_stateFilePath}");
+                return _messenger.State.SaveToFile(_stateFilePath);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.ErrorF($"[{LOG_TAG}] Error guardando estado: {ex.Message}");
+                return false;
             }
         }
 

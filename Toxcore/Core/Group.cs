@@ -1,35 +1,32 @@
 ﻿using System;
-using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
+using ToxCore.Core;
+using static ToxCore.Core.ToxState;
 
 namespace ToxCore.Core
 {
-    /// <summary>
-    /// Adaptación de group.c - Chats grupales de Tox
-    /// </summary>
+    #region ---- API pública (callbacks idénticos a tox.h) ----
+    public delegate void GroupInviteCallback(GroupManager mgr, int friendNumber, byte[] inviteData, string groupName, object userData);
+    public delegate void GroupMessageCallback(GroupManager mgr, int groupNumber, int peerNumber, ToxMessageType type, string message, object userData);
+    public delegate void GroupPeerJoinCallback(GroupManager mgr, int groupNumber, int peerNumber, object userData);
+    public delegate void GroupPeerExitCallback(GroupManager mgr, int groupNumber, int peerNumber, ToxGroupExitType exitType, string name, object userData);
+    public delegate void GroupSelfJoinCallback(GroupManager mgr, int groupNumber, object userData);
+    public delegate void GroupTopicCallback(GroupManager mgr, int groupNumber, int peerNumber, string topic, object userData);
+    public delegate void GroupPeerListUpdateCallback(GroupManager mgr, int groupNumber, object userData);
+    #endregion
+
     public class GroupManager : IDisposable
     {
         private const string LOG_TAG = "GROUP";
-
-        private Messenger _messenger;
-        private bool _isRunning;
-
-        // Almacenamiento de grupos
-        private readonly Dictionary<int, ToxGroup> _groups;
-        private readonly object _groupsLock = new object();
+        private readonly Messenger _messenger;
+        private readonly Dictionary<int, ToxGroup> _groups = new();
+        private readonly object _groupsLock = new();
         private int _lastGroupNumber = 0;
+        private bool _isRunning = false;
 
-        // Callbacks de grupos (equivalente a group.h callbacks)
-        public delegate void GroupInviteCallback(GroupManager manager, int friendNumber, byte[] inviteData, string groupName, object userData);
-        public delegate void GroupMessageCallback(GroupManager manager, int groupNumber, int peerNumber, ToxMessageType type, string message, object userData);
-        public delegate void GroupPeerJoinCallback(GroupManager manager, int groupNumber, int peerNumber, object userData);
-        public delegate void GroupPeerExitCallback(GroupManager manager, int groupNumber, int peerNumber, ToxGroupExitType exitType, string name, object userData);
-        public delegate void GroupSelfJoinCallback(GroupManager manager, int groupNumber, object userData);
-        public delegate void GroupTopicCallback(GroupManager manager, int groupNumber, int peerNumber, string topic, object userData);
-        public delegate void GroupPeerListUpdateCallback(GroupManager manager, int groupNumber, object userData);
-
-        // Eventos
+        #region ---- Eventos públicos ----
         public event GroupInviteCallback OnGroupInvite;
         public event GroupMessageCallback OnGroupMessage;
         public event GroupPeerJoinCallback OnGroupPeerJoin;
@@ -37,505 +34,379 @@ namespace ToxCore.Core
         public event GroupSelfJoinCallback OnGroupSelfJoin;
         public event GroupTopicCallback OnGroupTopic;
         public event GroupPeerListUpdateCallback OnGroupPeerListUpdate;
+        #endregion
 
         public GroupManager(Messenger messenger)
         {
             _messenger = messenger ?? throw new ArgumentNullException(nameof(messenger));
-            _groups = new Dictionary<int, ToxGroup>();
-            _isRunning = false;
-
-            Logger.Log.Info($"[{LOG_TAG}] Group Manager inicializado");
         }
 
-        /// <summary>
-        /// Iniciar gestión de grupos
-        /// </summary>
-        public bool Start()
+        #region ---- API pública (igual que toxgroup.h) ----
+        public int GroupNew(string name = "New Group")
         {
-            if (_isRunning)
+            lock (_groupsLock)
             {
-                Logger.Log.Warning($"[{LOG_TAG}] Group Manager ya está ejecutándose");
+                int g = _lastGroupNumber++;
+                var group = new ToxGroup(g, name, _messenger.State.User.PublicKey, _messenger);
+                _groups[g] = group;
+
+                group.OnGroupPacket += (pkt, senderPk) => HandleGroupPacket(g, pkt, senderPk);
+                Logger.Log.InfoF($"[{LOG_TAG}] Grupo creado: {name} (#{g})");
+                OnGroupSelfJoin?.Invoke(this, g, null);
+                return g;
+            }
+        }
+
+        public int GroupJoin(byte[] inviteData)
+        {
+            if (inviteData == null || inviteData.Length < 97) return -1;
+            lock (_groupsLock)
+            {
+                int g = _lastGroupNumber++;
+                var group = new ToxGroup(g, "Recibido", _messenger.State.User.PublicKey, _messenger);
+                group.HandleInvite(inviteData);
+                _groups[g] = group;
+                group.OnGroupPacket += (pkt, senderPk) => HandleGroupPacket(g, pkt, senderPk);
+                Logger.Log.InfoF($"[{LOG_TAG}] Unido a grupo #{g}");
+                OnGroupSelfJoin?.Invoke(this, g, null);
+                return g;
+            }
+        }
+
+        public bool GroupLeave(int groupNumber, string partMessage = "")
+        {
+            lock (_groupsLock)
+            {
+                if (!_groups.TryGetValue(groupNumber, out var g)) return false;
+                g.BroadcastExit(partMessage);
+                _groups.Remove(groupNumber);
+                Logger.Log.InfoF($"[{LOG_TAG}] Abandonado grupo #{groupNumber}");
                 return true;
             }
+        }
 
+        public bool GroupSendMessage(int groupNumber, ToxMessageType type, string message)
+        {
+            lock (_groupsLock)
+            {
+                return _groups.TryGetValue(groupNumber, out var g) && g.SendMessage(type, message);
+            }
+        }
+
+        public bool GroupSetTopic(int groupNumber, string topic)
+        {
+            lock (_groupsLock)
+            {
+                return _groups.TryGetValue(groupNumber, out var g) && g.SetTopic(topic);
+            }
+        }
+
+        public string GroupGetTopic(int groupNumber)
+        {
+            lock (_groupsLock) return _groups.TryGetValue(groupNumber, out var g) ? g.Topic : "";
+        }
+
+        public string GroupGetName(int groupNumber)
+        {
+            lock (_groupsLock) return _groups.TryGetValue(groupNumber, out var g) ? g.Name : "";
+        }
+
+        public int GroupGetPeerCount(int groupNumber)
+        {
+            lock (_groupsLock) return _groups.TryGetValue(groupNumber, out var g) ? g.PeerCount : 0;
+        }
+
+        public int[] GroupGetList()
+        {
+            lock (_groupsLock) return _groups.Keys.ToArray();
+        }
+
+        public bool GroupInviteFriend(int groupNumber, int friendNumber)
+        {
+            lock (_groupsLock)
+            {
+                if (!_groups.TryGetValue(groupNumber, out var g)) return false;
+                var invite = g.CreateInvite();
+                var friend = _messenger.State.Friends.Friends.FirstOrDefault(f => f.FriendNumber == friendNumber);
+                if (friend == null) return false;
+                int sent = _messenger.Onion.onion_send_1(invite, invite.Length, friend.PublicKey);
+                return sent > 0;
+            }
+        }
+        #endregion
+
+        #region ---- Manejo de paquetes entrantes ----
+        public int HandleGroupPacket(int friendNumber, byte[] packet, int length)
+        {
+            if (packet == null || length < 5) return -1;
+            byte type = packet[0];
+            int groupNumber = BitConverter.ToInt32(packet, 1);
+
+            lock (_groupsLock)
+            {
+                if (!_groups.TryGetValue(groupNumber, out var group)) return -1;
+                var friend = _messenger.State.Friends.Friends.FirstOrDefault(f => f.FriendNumber == friendNumber);
+                if (friend == null) return -1;
+                group.HandleMessage(packet, length, friend.PublicKey);
+                return 0;
+            }
+        }
+
+        private void HandleGroupPacket(int groupNumber, byte[] packet, byte[] senderPk)
+        {
+            // usado internamente por onion
+            lock (_groupsLock)
+            {
+                if (_groups.TryGetValue(groupNumber, out var g))
+                    g.HandleMessage(packet, packet.Length, senderPk);
+            }
+        }
+        #endregion
+
+        #region ---- Persistencia ----
+        public void SaveRuntimeState(ToxRuntimeState runtime)
+        {
+            lock (_groupsLock)
+            {
+                runtime.ActiveGroups = _groups.Values.Select(g => new ToxGroupState
+                {
+                    GroupNumber = g.GroupNumber,
+                    Name = g.Name,
+                    Topic = g.Topic,
+                    Peers = g.Peers.Select(p => new ToxGroupPeerState
+                    {
+                        PeerNumber = p.PeerNumber,
+                        Name = p.Name,
+                        PublicKey = p.PublicKey
+                    }).ToList()
+                }).ToList();
+            }
+        }
+
+        public bool Start()
+        {
             _isRunning = true;
-            Logger.Log.Info($"[{LOG_TAG}] Group Manager iniciado");
+            Logger.Log.Info($"[{LOG_TAG}] GroupManager iniciado");
             return true;
         }
 
-        /// <summary>
-        /// Detener gestión de grupos
-        /// </summary>
         public void Stop()
         {
-            if (!_isRunning) return;
-
             _isRunning = false;
-
-            lock (_groupsLock)
-            {
-                _groups.Clear();
-            }
-
-            Logger.Log.Info($"[{LOG_TAG}] Group Manager detenido");
+            Logger.Log.Info($"[{LOG_TAG}] GroupManager detenido");
         }
 
-        // ==================== API PÚBLICA DE GRUPOS ====================
-
-        /// <summary>
-        /// tox_group_new - Crear nuevo grupo
-        /// </summary>
-        public int GroupNew(string name)
+        public void LoadRuntimeState(ToxRuntimeState runtime)
         {
-            if (string.IsNullOrEmpty(name))
+            lock (_groupsLock)
             {
-                Logger.Log.Error($"[{LOG_TAG}] Nombre de grupo inválido");
-                return -1;
-            }
-
-            try
-            {
-                lock (_groupsLock)
+                foreach (var gs in runtime.ActiveGroups ?? new())
                 {
-                    int groupNumber = _lastGroupNumber++;
-                    var group = new ToxGroup(groupNumber, name);
-
-                    _groups[groupNumber] = group;
-
-                    // Agregarnos como primer peer
-                    var selfPeer = new GroupPeer(0, "Self", _messenger.State.User.PublicKey);
-                    group.AddPeer(selfPeer);
-
-                    Logger.Log.InfoF($"[{LOG_TAG}] Nuevo grupo creado: {name} (#{groupNumber})");
-
-                    // Disparar callback de self-join
-                    OnGroupSelfJoin?.Invoke(this, groupNumber, null);
-
-                    return groupNumber;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error creando grupo: {ex.Message}");
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_join - Unirse a grupo existente
-        /// </summary>
-        public int GroupJoin(byte[] inviteData)
-        {
-            if (inviteData == null || inviteData.Length == 0)
-            {
-                Logger.Log.Error($"[{LOG_TAG}] Datos de invitación inválidos");
-                return -1;
-            }
-
-            try
-            {
-                // Simular unirse a un grupo (en implementación real, esto procesaría la invitación)
-                lock (_groupsLock)
-                {
-                    int groupNumber = _lastGroupNumber++;
-                    string groupName = Encoding.UTF8.GetString(inviteData, 0, Math.Min(inviteData.Length, 64));
-
-                    var group = new ToxGroup(groupNumber, groupName);
-                    _groups[groupNumber] = group;
-
-                    // Agregarnos como peer
-                    var selfPeer = new GroupPeer(0, "Self", _messenger.State.User.PublicKey);
-                    group.AddPeer(selfPeer);
-
-                    Logger.Log.InfoF($"[{LOG_TAG}] Unido a grupo: {groupName} (#{groupNumber})");
-
-                    // Disparar callback
-                    OnGroupSelfJoin?.Invoke(this, groupNumber, null);
-
-                    return groupNumber;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error uniéndose a grupo: {ex.Message}");
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_send_message - Enviar mensaje al grupo
-        /// </summary>
-        public int GroupSendMessage(int groupNumber, ToxMessageType type, string message)
-        {
-            if (string.IsNullOrEmpty(message))
-            {
-                Logger.Log.Error($"[{LOG_TAG}] Mensaje de grupo vacío");
-                return -1;
-            }
-
-            try
-            {
-                lock (_groupsLock)
-                {
-                    if (!_groups.TryGetValue(groupNumber, out var group))
-                    {
-                        Logger.Log.Error($"[{LOG_TAG}] Grupo no encontrado: #{groupNumber}");
-                        return -1;
-                    }
-
-                    if (message.Length > Constants.TOX_MAX_MESSAGE_LENGTH)
-                    {
-                        Logger.Log.Error($"[{LOG_TAG}] Mensaje de grupo demasiado largo");
-                        return -1;
-                    }
-
-                    // En implementación real, esto enviaría el mensaje a todos los peers
-                    Logger.Log.InfoF($"[{LOG_TAG}] Mensaje enviado al grupo #{groupNumber}: '{message}'");
-
-                    // Simular recepción por otros peers
-                    SimulateMessageReceipt(groupNumber, message, type);
-
-                    return message.Length;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error enviando mensaje de grupo: {ex.Message}");
-                return -1;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_set_topic - Establecer tema del grupo
-        /// </summary>
-        public bool GroupSetTopic(int groupNumber, string topic)
-        {
-            if (string.IsNullOrEmpty(topic))
-            {
-                Logger.Log.Error($"[{LOG_TAG}] Tema de grupo inválido");
-                return false;
-            }
-
-            try
-            {
-                lock (_groupsLock)
-                {
-                    if (!_groups.TryGetValue(groupNumber, out var group))
-                    {
-                        Logger.Log.Error($"[{LOG_TAG}] Grupo no encontrado: #{groupNumber}");
-                        return false;
-                    }
-
-                    group.Topic = topic;
-                    Logger.Log.InfoF($"[{LOG_TAG}] Tema establecido en grupo #{groupNumber}: '{topic}'");
-
-                    // Disparar callback de cambio de tema
-                    OnGroupTopic?.Invoke(this, groupNumber, 0, topic, null);
-
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error estableciendo tema de grupo: {ex.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_get_topic - Obtener tema del grupo
-        /// </summary>
-        public string GroupGetTopic(int groupNumber)
-        {
-            lock (_groupsLock)
-            {
-                return _groups.TryGetValue(groupNumber, out var group) ? group.Topic : string.Empty;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_get_name - Obtener nombre del grupo
-        /// </summary>
-        public string GroupGetName(int groupNumber)
-        {
-            lock (_groupsLock)
-            {
-                return _groups.TryGetValue(groupNumber, out var group) ? group.Name : string.Empty;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_get_peer_name - Obtener nombre de peer en grupo
-        /// </summary>
-        public string GroupGetPeerName(int groupNumber, int peerNumber)
-        {
-            lock (_groupsLock)
-            {
-                if (!_groups.TryGetValue(groupNumber, out var group))
-                    return string.Empty;
-
-                var peer = group.GetPeer(peerNumber);
-                return peer?.Name ?? string.Empty;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_get_peer_count - Obtener número de peers en grupo
-        /// </summary>
-        public int GroupGetPeerCount(int groupNumber)
-        {
-            lock (_groupsLock)
-            {
-                return _groups.TryGetValue(groupNumber, out var group) ? group.PeerCount : 0;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_get_number_groups - Obtener número de grupos
-        /// </summary>
-        public int GroupGetNumberGroups()
-        {
-            lock (_groupsLock)
-            {
-                return _groups.Count;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_get_list - Obtener lista de números de grupo
-        /// </summary>
-        public int[] GroupGetList()
-        {
-            lock (_groupsLock)
-            {
-                return _groups.Keys.ToArray();
-            }
-        }
-
-        /// <summary>
-        /// tox_group_invite_friend - Invitar amigo a grupo
-        /// </summary>
-        public bool GroupInviteFriend(int groupNumber, int friendNumber)
-        {
-            try
-            {
-                lock (_groupsLock)
-                {
-                    if (!_groups.TryGetValue(groupNumber, out var group))
-                    {
-                        Logger.Log.Error($"[{LOG_TAG}] Grupo no encontrado: #{groupNumber}");
-                        return false;
-                    }
-
-                    // Simular invitación
-                    byte[] inviteData = Encoding.UTF8.GetBytes(group.Name);
-
-                    Logger.Log.InfoF($"[{LOG_TAG}] Amigo {friendNumber} invitado al grupo #{groupNumber}");
-
-                    // En implementación real, esto enviaría la invitación al amigo
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error invitando amigo a grupo: {ex.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// tox_group_leave - Abandonar grupo
-        /// </summary>
-        public bool GroupLeave(int groupNumber, string partMessage = "")
-        {
-            try
-            {
-                lock (_groupsLock)
-                {
-                    if (!_groups.Remove(groupNumber))
-                    {
-                        Logger.Log.Error($"[{LOG_TAG}] Grupo no encontrado: #{groupNumber}");
-                        return false;
-                    }
-
-                    Logger.Log.InfoF($"[{LOG_TAG}] Abandonado grupo #{groupNumber}: '{partMessage}'");
-
-                    // Disparar callback de salida
-                    OnGroupPeerExit?.Invoke(this, groupNumber, 0, ToxGroupExitType.TOX_GROUP_EXIT_QUIT, partMessage, null);
-
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log.ErrorF($"[{LOG_TAG}] Error abandonando grupo: {ex.Message}");
-                return false;
-            }
-        }
-
-        // ==================== MÉTODOS DE SIMULACIÓN/TEST ====================
-
-        /// <summary>
-        /// Simular invitación a grupo (para pruebas)
-        /// </summary>
-        public void SimulateGroupInvite(int friendNumber, string groupName)
-        {
-            byte[] inviteData = Encoding.UTF8.GetBytes(groupName);
-            OnGroupInvite?.Invoke(this, friendNumber, inviteData, groupName, null);
-        }
-
-        /// <summary>
-        /// Simular unirse a grupo (para pruebas)
-        /// </summary>
-        public int SimulateGroupJoin(string groupName)
-        {
-            byte[] inviteData = Encoding.UTF8.GetBytes(groupName);
-            return GroupJoin(inviteData);
-        }
-
-        /// <summary>
-        /// Simular peer uniéndose a grupo (para pruebas)
-        /// </summary>
-        public void SimulatePeerJoin(int groupNumber, string peerName)
-        {
-            lock (_groupsLock)
-            {
-                if (_groups.TryGetValue(groupNumber, out var group))
-                {
-                    int peerNumber = group.PeerCount;
-                    var peer = new GroupPeer(peerNumber, peerName, new byte[32]);
-                    group.AddPeer(peer);
-
-                    OnGroupPeerJoin?.Invoke(this, groupNumber, peerNumber, null);
-                    OnGroupPeerListUpdate?.Invoke(this, groupNumber, null);
+                    var g = new ToxGroup(gs.GroupNumber, gs.Name, gs.Peers.First().PublicKey, _messenger) { Topic = gs.Topic };
+                    _groups[gs.GroupNumber] = g;
+                    g.OnGroupPacket += (pkt, senderPk) => HandleGroupPacket(gs.GroupNumber, pkt, senderPk);
                 }
             }
         }
+        #endregion
 
-        /// <summary>
-        /// Simular peer abandonando grupo (para pruebas)
-        /// </summary>
-        public void SimulatePeerExit(int groupNumber, int peerNumber, ToxGroupExitType exitType, string exitMessage)
+        #region ---- Tests ----
+        public static bool Test()
         {
-            lock (_groupsLock)
-            {
-                if (_groups.TryGetValue(groupNumber, out var group))
-                {
-                    group.RemovePeer(peerNumber);
-                    OnGroupPeerExit?.Invoke(this, groupNumber, peerNumber, exitType, exitMessage, null);
-                    OnGroupPeerListUpdate?.Invoke(this, groupNumber, null);
-                }
-            }
-        }
+            Console.WriteLine("🔬 Testing GroupManager...");
+            var messenger = new Messenger();
+            var gm = new GroupManager(messenger);
 
-        // ==================== MÉTODOS PRIVADOS ====================
+            int g = gm.GroupNew("TestGroup");
+            if (g < 0) { Console.WriteLine("❌ GroupNew falló"); return false; }
 
-        private void SimulateMessageReceipt(int groupNumber, string message, ToxMessageType type)
-        {
-            // Simular que otros peers reciben el mensaje
-            lock (_groupsLock)
-            {
-                if (_groups.TryGetValue(groupNumber, out var group))
-                {
-                    // En implementación real, esto enviaría a todos los peers
-                    // Por ahora, solo disparamos el callback para simular recepción
-                    OnGroupMessage?.Invoke(this, groupNumber, 1, type, $"(Eco) {message}", null);
-                }
-            }
+            bool ok = gm.GroupSetTopic(g, "Nuevo topic");
+            if (!ok) { Console.WriteLine("❌ GroupSetTopic falló"); return false; }
+
+            Console.WriteLine("✅ GroupManager tests pasados");
+            return true;
         }
+        #endregion
 
         public void Dispose()
         {
-            Stop();
+            lock (_groupsLock) _groups.Clear();
         }
     }
 
-    // ==================== CLASES DE DATOS DE GRUPO ====================
-
-    /// <summary>
-    /// Representa un grupo de chat
-    /// </summary>
+    #region ---- Modelos internos ----
     public class ToxGroup
     {
         public int GroupNumber { get; }
         public string Name { get; set; }
         public string Topic { get; set; }
-        public List<GroupPeer> Peers { get; }
+        public List<GroupPeer> Peers { get; } = new();
         public int PeerCount => Peers.Count;
-        public DateTime CreatedAt { get; }
 
-        public ToxGroup(int groupNumber, string name)
+        public delegate void GroupPacketHandler(byte[] packet, byte[] senderPk);
+        public event GroupPacketHandler OnGroupPacket;
+
+        private readonly byte[] _selfPk;
+        private readonly Messenger _messenger;
+
+        public Action<int, int, ToxMessageType, string, byte[]> OnGroupMessageReceived;
+        public Action<int, int, string, byte[]> OnGroupTopicChanged;
+        public Action<int, int, byte[]> OnGroupPeerJoined;
+        public Action<int, int, ToxGroupExitType, string, byte[]> OnGroupPeerLeft;
+
+        public ToxGroup(int groupNumber, string name, byte[] selfPk, Messenger messenger)
         {
             GroupNumber = groupNumber;
             Name = name;
-            Topic = string.Empty;
-            Peers = new List<GroupPeer>();
-            CreatedAt = DateTime.UtcNow;
+            Topic = "";
+            _selfPk = selfPk;
+            _messenger = messenger;
+            Peers.Add(new GroupPeer(0, "Self", selfPk));
         }
 
-        public void AddPeer(GroupPeer peer)
+        public byte[] CreateInvite()
         {
-            Peers.Add(peer);
+            byte[] invite = new byte[97];
+            invite[0] = 0x60; // GROUP_INVITE
+            Buffer.BlockCopy(_selfPk, 0, invite, 1, 32);
+            Buffer.BlockCopy(BitConverter.GetBytes(GroupNumber), 0, invite, 33, 4);
+            Buffer.BlockCopy(Encoding.UTF8.GetBytes(Name.PadRight(32)), 0, invite, 65, 32);
+            return invite;
         }
 
-        public void RemovePeer(int peerNumber)
+        public void HandleInvite(byte[] data)
         {
-            Peers.RemoveAll(p => p.PeerNumber == peerNumber);
+            if (data.Length < 97 || data[0] != 0x60) return;
+            Buffer.BlockCopy(data, 65, new byte[32], 0, 32);
+            Name = Encoding.UTF8.GetString(data, 65, 32).TrimEnd('\0');
         }
 
-        public GroupPeer GetPeer(int peerNumber)
+        public bool SendMessage(ToxMessageType type, string message)
         {
-            return Peers.FirstOrDefault(p => p.PeerNumber == peerNumber);
+            if (string.IsNullOrWhiteSpace(message)) return false;
+            byte[] payload = Encoding.UTF8.GetBytes(message);
+            byte[] packet = new byte[6 + payload.Length];
+            packet[0] = 0x62; // GROUP_MESSAGE
+            Buffer.BlockCopy(BitConverter.GetBytes(GroupNumber), 0, packet, 1, 4);
+            packet[5] = (byte)type;
+            Buffer.BlockCopy(payload, 0, packet, 6, payload.Length);
+            BroadcastPacket(packet);
+            return true;
         }
 
-        public override string ToString()
+        public bool SetTopic(string topic)
         {
-            return $"{Name} (#{GroupNumber}) - {PeerCount} miembros - Tema: {Topic}";
+            if (string.IsNullOrWhiteSpace(topic)) return false;
+            Topic = topic;
+            byte[] payload = Encoding.UTF8.GetBytes(topic);
+            byte[] packet = new byte[5 + payload.Length];
+            packet[0] = 0x63; // GROUP_TOPIC
+            Buffer.BlockCopy(BitConverter.GetBytes(GroupNumber), 0, packet, 1, 4);
+            Buffer.BlockCopy(payload, 0, packet, 5, payload.Length);
+            BroadcastPacket(packet);
+            return true;
+        }
+
+        public void BroadcastPacket(byte[] packet)
+        {
+            foreach (var peer in Peers.Where(p => !ByteArraysEqual(p.PublicKey, _selfPk)))
+                _messenger.Onion.onion_send_1(packet, packet.Length, peer.PublicKey);
+        }
+
+        public void HandleMessage(byte[] data, int length, byte[] senderPk)
+        {
+            if (length < 5) return;
+            var type = (ToxGroupPacketType)data[0];
+            int peerNumber = GetPeerNumber(senderPk);
+
+            switch (type)
+            {
+                case ToxGroupPacketType.GROUP_MESSAGE:
+                    string msg = Encoding.UTF8.GetString(data, 6, length - 6);
+                    var msgType = (ToxMessageType)data[5];
+                    OnGroupMessageReceived?.Invoke(GroupNumber, peerNumber, msgType, msg, senderPk);
+                    break;
+
+                case ToxGroupPacketType.GROUP_TOPIC:
+                    Topic = Encoding.UTF8.GetString(data, 5, length - 5);
+                    OnGroupTopicChanged?.Invoke(GroupNumber, peerNumber, Topic, senderPk);
+                    break;
+
+                case ToxGroupPacketType.GROUP_PEER_JOIN:
+                    string name = Encoding.UTF8.GetString(data, 5, length - 5);
+                    Peers.Add(new GroupPeer(Peers.Count, name, senderPk));
+                    OnGroupPeerJoined?.Invoke(GroupNumber, Peers.Count - 1, senderPk);
+                    break;
+
+                case ToxGroupPacketType.GROUP_PEER_EXIT:
+                    var peer = Peers.FirstOrDefault(p => ByteArraysEqual(p.PublicKey, senderPk));
+                    if (peer != null)
+                    {
+                        Peers.Remove(peer);
+                        OnGroupPeerLeft?.Invoke(GroupNumber, peer.PeerNumber, ToxGroupExitType.QUIT, peer.Name, senderPk);
+                    }
+                    break;
+            }
+        }
+
+
+        public void BroadcastExit(string reason)
+        {
+            byte[] payload = Encoding.UTF8.GetBytes(reason);
+            byte[] packet = new byte[5 + payload.Length];
+            packet[0] = 0x64; // GROUP_PEER_EXIT
+            Buffer.BlockCopy(BitConverter.GetBytes(GroupNumber), 0, packet, 1, 4);
+            Buffer.BlockCopy(payload, 0, packet, 5, payload.Length);
+            BroadcastPacket(packet);
+        }
+
+        private int GetPeerNumber(byte[] publicKey) => Peers.FindIndex(p => ByteArraysEqual(p.PublicKey, publicKey));
+
+        private static bool ByteArraysEqual(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
         }
     }
 
-    /// <summary>
-    /// Representa un peer en un grupo
-    /// </summary>
     public class GroupPeer
     {
         public int PeerNumber { get; }
         public string Name { get; set; }
         public byte[] PublicKey { get; }
-        public DateTime JoinedAt { get; }
-
         public GroupPeer(int peerNumber, string name, byte[] publicKey)
         {
             PeerNumber = peerNumber;
             Name = name;
-            PublicKey = publicKey;
-            JoinedAt = DateTime.UtcNow;
-        }
-
-        public override string ToString()
-        {
-            return $"{Name} (#{PeerNumber})";
+            PublicKey = publicKey ?? new byte[32];
         }
     }
 
-    /// <summary>
-    /// Tipos de salida de grupo
-    /// </summary>
-    public enum ToxGroupExitType
+    public enum ToxGroupExitType { QUIT, TIMEOUT, KICK, DISCONNECT }
+
+    public enum ToxGroupPacketType : byte
     {
-        TOX_GROUP_EXIT_QUIT = 0,      // Salida voluntaria
-        TOX_GROUP_EXIT_TIMEOUT = 1,   // Timeout de conexión
-        TOX_GROUP_EXIT_DISCONNECT = 2,// Desconexión
-        TOX_GROUP_EXIT_KICK = 3       // Expulsado
+        GROUP_INVITE = 0x60,
+        GROUP_PEER_JOIN = 0x61,
+        GROUP_MESSAGE = 0x62,
+        GROUP_TOPIC = 0x63,
+        GROUP_PEER_EXIT = 0x64
     }
 
-    /// <summary>
-    /// Constantes para grupos
-    /// </summary>
-    public static class Constants
+    public class ToxGroupState
     {
-        public const int TOX_MAX_MESSAGE_LENGTH = 1372;
-        public const int TOX_MAX_NAME_LENGTH = 128;
-        public const int TOX_GROUP_MAX_PEERS = 500;
+        public int GroupNumber { get; set; }
+        public string Name { get; set; }
+        public string Topic { get; set; }
+        public List<ToxGroupPeerState> Peers { get; set; } = new();
     }
+
+    public class ToxGroupPeerState
+    {
+        public int PeerNumber { get; set; }
+        public string Name { get; set; }
+        public byte[] PublicKey { get; set; }
+    }
+    #endregion
 }
