@@ -4,9 +4,9 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Threading;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core.Abstractions;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Sistema de reenvío de paquetes (forwarding.c).

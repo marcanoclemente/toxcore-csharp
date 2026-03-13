@@ -1,5 +1,5 @@
 ﻿// Core/Abstractions/DhtConstants.cs (completo basado en DHT.c)
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     public static class DhtConstants
     {

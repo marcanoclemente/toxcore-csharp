@@ -3,9 +3,9 @@ using System;
 using System.Buffers.Binary;
 using System.IO;
 using System.Text;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core.Abstractions;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Implementación manual de empaquetado binario compatible con bin_pack.c.

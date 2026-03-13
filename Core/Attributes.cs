@@ -3,9 +3,9 @@ using System;
 using System.Collections.Concurrent;
 using System.Text;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core.Abstractions;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Gestiona atributos de usuario: nombre, status message, status (online/away/busy).

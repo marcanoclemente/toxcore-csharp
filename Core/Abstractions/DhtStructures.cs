@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/DhtStructures.cs
 using System.Net;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Representa un nodo DHT con su clave pública y endpoint.

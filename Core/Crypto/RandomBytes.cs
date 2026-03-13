@@ -1,5 +1,5 @@
 ﻿using System;
-using ToxCore.Core;
+using Toxcore.Core;
 
 namespace Toxcore.Core.Crypto
 {

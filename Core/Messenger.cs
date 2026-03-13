@@ -8,10 +8,10 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Threading;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
-using ToxCore.Core.Abstractions.Onion;
+using Toxcore.Core.Abstractions;
+using Toxcore.Core.Abstractions.Onion;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     public sealed class Messenger : IMessenger, IDisposable
     {

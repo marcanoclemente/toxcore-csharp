@@ -3,9 +3,9 @@ using System;
 using System.Buffers.Binary;
 using System.Linq;
 using System.Security.Cryptography;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core.Abstractions;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Implementación exacta de friend_requests.c
@@ -153,17 +153,28 @@ namespace ToxCore.Core
         #region Handler de Paquetes - NO SIMULADO
 
         /// <summary>
-        /// Handler real de paquetes de solicitud de amistad.
-        /// Llamado por FriendConnection cuando recibe packet 0x20.
-        /// 
-        /// Formato del paquete que recibimos:
-        /// [nospam(4 bytes)][mensaje...]
-        /// 
-        /// La public key viene como parámetro separado desde FriendConnection.
+        /// CORREGIDO: Handler real con validación de buffer segura.
         /// </summary>
         private void HandleFriendRequestPacket(object obj, byte[] publicKey, byte[] data,
                                        uint length, object userdata)
         {
+            // CORREGIDO: Validación de longitud mínima (1 byte ID + 4 bytes nospam)
+            const uint MinPacketSize = 1 + sizeof(uint); // 5 bytes mínimo
+
+            if (length < MinPacketSize)
+            {
+                Logger.Log.Debug($"[FriendRequests] Packet too short: {length} < {MinPacketSize}");
+                return;
+            }
+
+            // CORREGIDO: Validación de longitud máxima
+            const uint MaxPacketSize = 1633; // ONION_CLIENT_MAX_DATA_SIZE
+            if (length > MaxPacketSize)
+            {
+                Logger.Log.Warning($"[FriendRequests] Packet too long: {length} > {MaxPacketSize}");
+                return;
+            }
+
             // 1. Verificar longitud mínima (1 byte ID + 4 bytes nospam)
             // y máxima según onion_client.h
             const int ONION_CLIENT_MAX_DATA_SIZE = 1633; // Ajusta según tu proyecto
@@ -216,10 +227,13 @@ namespace ToxCore.Core
             AddToReceivedList(publicKey);
 
             // 7. Calcular longitud del mensaje (después de nospam, restando el byte inicial)
+            // CORREGIDO: Cálculo seguro de messageLen
             uint messageLen = length - sizeof(uint) - 1; // -1 por el byte ID saltado
+
+            // CORREGIDO: Verificación adicional de overflow
             if (messageLen > MaxFriendRequestDataSize)
             {
-                Logger.Log.Warning($"[FriendRequests] Message too long from {Logger.SafeKeyThumb(publicKey)}: {messageLen}");
+                Logger.Log.Warning($"[FriendRequests] Message truncated from {messageLen} to {MaxFriendRequestDataSize}");
                 messageLen = MaxFriendRequestDataSize;
             }
 

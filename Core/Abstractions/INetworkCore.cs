@@ -4,7 +4,7 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz del núcleo de networking UDP.

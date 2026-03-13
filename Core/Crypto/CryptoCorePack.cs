@@ -1,8 +1,8 @@
 ﻿// Core/CryptoCorePack.cs - Implementación concreta
 using System;
 using System.Security.Cryptography;
-using ToxCore.Core;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core;
+using Toxcore.Core.Abstractions;
 
 namespace Toxcore.Core.Crypto
 {

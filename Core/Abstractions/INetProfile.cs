@@ -2,7 +2,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz de estadísticas de tráfico de red.

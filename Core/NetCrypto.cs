@@ -7,11 +7,11 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Threading;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
-using ToxCore.Core.Abstractions.TCP;
-using ToxCore.Core.TCP;
+using Toxcore.Core.Abstractions;
+using Toxcore.Core.Abstractions.TCP;
+using Toxcore.Core.TCP;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Implementación COMPLETA Y FUNCIONAL de cifrado de conexiones de red (net_crypto.c).
@@ -139,8 +139,46 @@ namespace ToxCore.Core
         /// </summary>
         public bool EstablishSecureConnection(IPEndPoint endpoint, byte[] publicKey)
         {
-            if (publicKey == null || publicKey.Length != LibSodium.CRYPTO_PUBLIC_KEY_SIZE)
+            // CORREGIDO: Validar endpoint
+            if (endpoint == null)
+            {
+                Logger.Log.Error("[NetCrypto] Cannot establish connection: endpoint is null");
                 return false;
+            }
+
+            // CORREGIDO: Verificar que no sea IP any (0.0.0.0 o ::)
+            if (endpoint.Address.Equals(IPAddress.Any) ||
+                endpoint.Address.Equals(IPAddress.IPv6Any))
+            {
+                Logger.Log.Error($"[NetCrypto] Cannot establish connection to {endpoint.Address}: unspecified address");
+                return false;
+            }
+
+            // CORREGIDO: Verificar puerto válido
+            if (endpoint.Port == 0)
+            {
+                Logger.Log.Error("[NetCrypto] Cannot establish connection: port is 0");
+                return false;
+            }
+
+            // CORREGIDO: Validar clave pública con mensaje detallado
+            if (publicKey == null || publicKey.Length != LibSodium.CRYPTO_PUBLIC_KEY_SIZE)
+            {
+                Logger.Log.Error($"[NetCrypto] Invalid public key: null or wrong size");
+                return false;
+            }
+
+            // CORREGIDO: Verificar que no sea todos ceros
+            bool allZero = true;
+            for (int i = 0; i < publicKey.Length; i++)
+            {
+                if (publicKey[i] != 0) { allZero = false; break; }
+            }
+            if (allZero)
+            {
+                Logger.Log.Error("[NetCrypto] Invalid public key: all zeros");
+                return false;
+            }
 
             // Verificar si ya existe conexión con este public key
             if (_publicKeyToId.TryGetValue(publicKey, out int existingId))
@@ -368,6 +406,7 @@ namespace ToxCore.Core
         /// <summary>
         /// IMPLEMENTADO: Establece IP/Port directo para una conexión existente.
         /// Equivalente a set_direct_ip_port() en net_crypto.c
+        /// CORREGIDO: Validaciones y manejo de redirect.
         /// </summary>
         public bool SetDirectIpPort(int connectionId, IPEndPoint newIpPort, bool redirect)
         {
@@ -379,34 +418,42 @@ namespace ToxCore.Core
 
             var oldEndpoint = conn.Endpoint;
 
-            // Validar nuevo endpoint
-            if (newIpPort == null || (newIpPort.Address.Equals(IPAddress.Any) && newIpPort.Port == 0))
+            // CORREGIDO: Validar nuevo endpoint
+            if (newIpPort == null)
             {
-                Logger.Log.Warning($"[NetCrypto] Invalid new endpoint for connection {connectionId}");
+                Logger.Log.Error("[NetCrypto] SetDirectIpPort: newIpPort is null");
                 return false;
             }
 
-            // CORRECCIÓN: Remover la verificación de SendBufferLength que no existe
-            // Si redirect=false, simplemente loggear advertencia pero permitir el cambio
-            // El protocolo Tox original maneja esto de otra forma
+            // CORREGIDO: Verificar que no sea IP any
+            if (newIpPort.Address.Equals(IPAddress.Any) ||
+                newIpPort.Address.Equals(IPAddress.IPv6Any))
+            {
+                Logger.Log.Error($"[NetCrypto] SetDirectIpPort: invalid address {newIpPort.Address}");
+                return false;
+            }
 
+            if (newIpPort.Port == 0)
+            {
+                Logger.Log.Error("[NetCrypto] SetDirectIpPort: port is 0");
+                return false;
+            }
+
+            // CORREGIDO: Si redirect=false, verificar actividad reciente
             if (!redirect)
             {
-                // En el C original, esto pospondría el cambio, pero sin SendBufferLength
-                // usamos una heurística simple: si hubo actividad reciente, permitir
                 var timeSinceLastSend = _monoTime.GetSeconds() - conn.LastSendTime;
-                if (timeSinceLastSend < 1)  // Si enviamos hace menos de 1 segundo
+                if (timeSinceLastSend < 1) // Si enviamos hace menos de 1 segundo
                 {
                     Logger.Log.Debug($"[NetCrypto] Postponing IP change for {connectionId} due to recent activity");
-                    // Opcional: podrías retornar false aquí, pero mejor permitir el cambio
-                    // y dejar que la capa superior maneje retransmisiones si es necesario
+                    // Permitir el cambio pero loggear advertencia
                 }
             }
 
             // Actualizar endpoint en la conexión
             conn.Endpoint = newIpPort;
 
-            // CORRECCIÓN: Actualizar tiempo de recepción para evitar timeout inmediato
+            // CORREGIDO: Actualizar tiempos para evitar timeout inmediato
             conn.LastRecvTime = _monoTime.GetSeconds();
             conn.LastSendTime = _monoTime.GetSeconds();
 

@@ -2,9 +2,10 @@
 using System;
 using System.Net;
 using System.Runtime.CompilerServices;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core.Abstractions;
+using Toxcore.Core.Crypto;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Implementación del sistema de ping DHT (ping.c).
@@ -143,10 +144,22 @@ namespace ToxCore.Core
 
         public void SendRequest(IPEndPoint ipPort, byte[] publicKey)
         {
-            if (PkEqual(publicKey, _dht.SelfPublicKey.ToArray())) return;
+            // CORREGIDO: Validar clave pública
+            if (!publicKey.IsValidPublicKey(out var error))
+            {
+                Logger.Log.Warning($"[Ping] Invalid public key: {error}");
+                return;
+            }
+
+            if (PkEqual(publicKey, _dht.SelfPublicKey.ToArray()))
+                return;
 
             var sharedKey = _sharedKeysSent.Lookup(publicKey);
-            if (sharedKey == null) return;
+            if (sharedKey == null)
+            {
+                Logger.Log.Debug($"[Ping] No shared key for {ipPort}");
+                return;
+            }
 
             // Generar ping_id usando PingArray
             byte[] data = new byte[PingDataSize];
@@ -260,13 +273,25 @@ namespace ToxCore.Core
             ping.Add(senderPk, source);
         }
 
+        /// <summary>
+        /// CORREGIDO: Validar respuesta de ping más estrictamente.
+        /// </summary>
         private static void HandlePingResponse(object state, IPEndPoint source, ReadOnlySpan<byte> packet, object userdata)
         {
             var ping = (Ping)state;
-            if (packet.Length != DhtPingSize) return;
+            // CORREGIDO: Verificar tamaño exacto
+            if (packet.Length != DhtPingSize)
+            {
+                Logger.Log.Debug($"[Ping] Invalid ping response size: {packet.Length}");
+                return;
+            }
 
             var senderPk = packet.Slice(1, LibSodium.CRYPTO_PUBLIC_KEY_SIZE).ToArray();
-            if (PkEqual(senderPk, ping._dht.SelfPublicKey.ToArray())) return;
+            if (!senderPk.IsValidPublicKey(out var error))
+            {
+                Logger.Log.Warning($"[Ping] Invalid public key in response: {error}");
+                return;
+            }
 
             var sharedKey = ping._sharedKeysSent.Lookup(senderPk);
             if (sharedKey == null) return;

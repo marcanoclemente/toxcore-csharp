@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/IBinUnpack.cs
 using System;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz para desempaquetado binario de datos (bin_unpack.h).

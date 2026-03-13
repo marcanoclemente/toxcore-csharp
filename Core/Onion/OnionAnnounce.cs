@@ -1,15 +1,20 @@
-﻿// Core/Onion/OnionAnnounce.cs - VERSIÓN CORREGIDA
+﻿// Core/Onion/OnionAnnounce.cs - VERSIÓN COMPLETA CORREGIDA
 using System;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Security.Cryptography;
+using System.Threading;
+using Toxcore.Core;
+using Toxcore.Core.Abstractions;
+using Toxcore.Core.Abstractions.Onion;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
-using ToxCore.Core.Abstractions.Onion;
 
-namespace ToxCore.Core.Onion
+
+namespace Toxcore.Core.Onion
 {
     /// <summary>
     /// Sistema de anuncios vía onion routing corregido.
@@ -70,7 +75,7 @@ namespace ToxCore.Core.Onion
 
         /// <summary>
         /// Publica un anuncio en la red onion.
-        /// CORRECCIÓN: Usa el sendback del OnionCore para recibir la confirmación.
+        /// Usa el sendback del OnionCore para recibir la confirmación.
         /// </summary>
         public bool AnnounceOnion(IPEndPoint[] path, byte[] publicKey, byte[] nonce, byte[] data = null)
         {
@@ -116,7 +121,7 @@ namespace ToxCore.Core.Onion
 
         /// <summary>
         /// Busca anuncios para una clave pública específica.
-        /// CORRECCIÓN: Usa el sendback para recibir resultados.
+        /// Usa el sendback para recibir resultados.
         /// </summary>
         public bool SearchOnion(IPEndPoint[] path, byte[] targetPublicKey, byte[] searchNonce)
         {
@@ -216,12 +221,12 @@ namespace ToxCore.Core.Onion
         #region Construcción de Paquetes
 
         /// <summary>
-        /// CORREGIDO: Construye paquete de anuncio con requestId en datos cifrados.
+        /// Construye paquete de anuncio con requestId en datos cifrados.
         /// El requestId no va en plaintext para evitar tracking.
         /// </summary>
         private byte[] BuildAnnouncePacket(ulong requestId, byte[] publicKey, byte[] nonce, byte[] data)
         {
-            using var ms = new System.IO.MemoryStream();
+            using var ms = new MemoryStream();
 
             // Tipo de paquete (va en la capa cifrada, no aquí)
             // Lo que va en plaintext es mínimo
@@ -246,7 +251,7 @@ namespace ToxCore.Core.Onion
 
         private byte[] BuildSearchPacket(ulong requestId, byte[] targetPublicKey, byte[] searchNonce)
         {
-            using var ms = new System.IO.MemoryStream();
+            using var ms = new MemoryStream();
 
             ms.WriteByte(PacketSearchRequest);
 
@@ -262,7 +267,7 @@ namespace ToxCore.Core.Onion
 
         private byte[] BuildAnnounceResponse(ulong requestId, bool success, byte[] pingId, IPEndPoint[] closeNodes)
         {
-            using var ms = new System.IO.MemoryStream();
+            using var ms = new MemoryStream();
 
             ms.WriteByte(PacketAnnounceResponse);
 
@@ -291,7 +296,7 @@ namespace ToxCore.Core.Onion
 
         private byte[] BuildSearchResponse(ulong requestId, bool found, OnionAnnounceEntry entry)
         {
-            using var ms = new System.IO.MemoryStream();
+            using var ms = new MemoryStream();
 
             ms.WriteByte(PacketSearchResponse);
 
@@ -323,7 +328,7 @@ namespace ToxCore.Core.Onion
 
         /// <summary>
         /// Maneja una solicitud de anuncio entrante.
-        /// CORRECCIÓN: Usa SendOnionResponse para enviar la respuesta vía sendback.
+        /// Usa SendOnionResponse para enviar la respuesta vía sendback.
         /// </summary>
         private void HandleAnnounceRequestPacket(IPEndPoint source, byte[] data, byte[] senderPublicKey)
         {
@@ -364,7 +369,7 @@ namespace ToxCore.Core.Onion
                 // Construir respuesta
                 byte[] response = BuildAnnounceResponse(requestId, true, pingId, closeNodes);
 
-                // CORRECCIÓN CRÍTICA: Usar SendOnionResponse con el nonce original
+                // Usar SendOnionResponse con el nonce original
                 // El nonce original está en data[1+8 ... 1+8+23] (después del requestId)
                 byte[] originalNonce = new byte[LibSodium.CRYPTO_NONCE_SIZE];
                 Array.Copy(data, 1 + 8, originalNonce, 0, LibSodium.CRYPTO_NONCE_SIZE);
@@ -425,7 +430,7 @@ namespace ToxCore.Core.Onion
 
         /// <summary>
         /// Maneja una solicitud de búsqueda entrante.
-        /// CORRECCIÓN: Usa SendOnionResponse para la respuesta.
+        /// Usa SendOnionResponse para la respuesta.
         /// </summary>
         private void HandleSearchRequestPacket(IPEndPoint source, byte[] data, byte[] senderPublicKey)
         {
@@ -448,7 +453,7 @@ namespace ToxCore.Core.Onion
                 // Construir respuesta
                 byte[] response = BuildSearchResponse(requestId, found, entry);
 
-                // CORRECCIÓN: Usar SendOnionResponse con el nonce original
+                // Usar SendOnionResponse con el nonce original
                 byte[] originalNonce = new byte[LibSodium.CRYPTO_NONCE_SIZE];
                 Array.Copy(data, 1 + 8, originalNonce, 0, LibSodium.CRYPTO_NONCE_SIZE);
 
@@ -511,7 +516,7 @@ namespace ToxCore.Core.Onion
         }
 
         /// <summary>
-        /// CORREGIDO: Procesa datos onion recibidos según su tipo.
+        /// Procesa datos onion recibidos según su tipo.
         /// </summary>
         private void HandleOnionData(IPEndPoint source, byte[] data, byte[] nonce)
         {
@@ -580,12 +585,12 @@ namespace ToxCore.Core.Onion
         }
 
         /// <summary>
-        /// CORREGIDO: Genera pingId usando SHA512 (más cercano a generichash de libsodium).
+        /// Genera pingId usando SHA512 (más cercano a generichash de libsodium).
         /// En Tox original usa crypto_generichash (BLAKE2b), pero SHA512 es aceptable.
         /// </summary>
         private byte[] GeneratePingId(byte[] publicKey, byte[] nonce)
         {
-            using var sha512 = System.Security.Cryptography.SHA512.Create();
+            using var sha512 = SHA512.Create();
 
             // Datos: publicKey + nonce + timestamp
             var timestamp = BitConverter.GetBytes(_monoTime.GetSeconds());
@@ -626,7 +631,7 @@ namespace ToxCore.Core.Onion
 
         private byte[] SerializeNode(IPEndPoint endpoint)
         {
-            using var ms = new System.IO.MemoryStream();
+            using var ms = new MemoryStream();
 
             bool isIPv6 = endpoint.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
             ms.WriteByte(isIPv6 ? (byte)10 : (byte)2);

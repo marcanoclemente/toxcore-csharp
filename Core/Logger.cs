@@ -1,7 +1,7 @@
 ﻿using System.Runtime.CompilerServices;
 using System.Text;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Niveles de log compatibles con toxcore

@@ -2,7 +2,7 @@
 using System;
 using System.Net;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     // NOTA: Usamos los delegates existentes de IFriendRequests e IFriendConnection para comunicación interna,
     // pero definimos delegates públicos más limpios para la API de IMessenger.

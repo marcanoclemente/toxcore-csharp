@@ -8,10 +8,10 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Threading;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
-using ToxCore.Core.Abstractions.Onion;
+using Toxcore.Core.Abstractions;
+using Toxcore.Core.Abstractions.Onion;
 
-namespace ToxCore.Core.Onion
+namespace Toxcore.Core.Onion
 {
     /// <summary>
     /// Implementación corregida del núcleo de onion routing de ToxCore.

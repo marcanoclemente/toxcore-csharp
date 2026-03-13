@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/IPing.cs
 using System.Net;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz del sistema de ping (ping.h).

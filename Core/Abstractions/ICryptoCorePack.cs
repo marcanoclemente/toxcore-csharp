@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/ICryptoCorePack.cs
 using System;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz para empaquetado/desempaquetado de claves extendidas.

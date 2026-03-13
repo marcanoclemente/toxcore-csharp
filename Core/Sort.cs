@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Comparador personalizado para MergeSort (sort.h).

@@ -3,9 +3,9 @@ using System;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
-using ToxCore.Core.TCP;
+using Toxcore.Core.TCP;
 
-namespace ToxCore.Core.Abstractions.TCP
+namespace Toxcore.Core.Abstractions.TCP
 {
     public interface ITCPClient : IDisposable
     {

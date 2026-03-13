@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/PacientHandler.cs
 using System.Net;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Callback para manejo de paquetes entrantes.

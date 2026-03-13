@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/INetworkUtilities.cs
 using System.Net;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Utilidades estáticas de manipulación de IP/Port.

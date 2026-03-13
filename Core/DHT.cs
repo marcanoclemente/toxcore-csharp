@@ -7,9 +7,9 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Threading;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core.Abstractions;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Implementación completa y corregida de la tabla hash distribuida (DHT).
@@ -376,22 +376,31 @@ namespace ToxCore.Core
 
         public int GetFriendIp(byte[] publicKey, out IPEndPoint ipPort)
         {
-            ipPort = null!;
+            ipPort = null!;  // CORREGIDO: null-forgiving operator para out param
             if (publicKey == null) return -1;
 
-            lock (_lockDht)
+            lock (_lockDht)  // CORREGIDO: usar _lockDht (no _friendsLock)
             {
                 var friendIndex = IndexOfFriendPk(publicKey);
                 if (friendIndex == uint.MaxValue) return -1;
 
-                var now = GetCurrentTime();
-                ref var friend = ref _friendsList[friendIndex];
+                // CORREGIDO: DhtFriend es struct, usar ref para evitar copia
+                ref var friend = ref _friendsList[friendIndex];  // CORREGIDO: _friendsList (no _friends)
 
+                var now = GetCurrentTime();
+
+                // CORREGIDO: ClientList es array de structs, usar ref
                 for (int i = 0; i < friend.ClientList.Length; i++)
                 {
-                    ref var client = ref friend.ClientList[i];
-                    if (client.PublicKey != null && PkEqual(client.PublicKey, publicKey))
+                    ref var client = ref friend.ClientList[i];  // CORREGIDO: ref para struct
+
+                    // CORREGIDO: Verificar PublicKey no sea null
+                    if (client.PublicKey == null) continue;
+
+                    if (PkEqual(client.PublicKey, publicKey))
                     {
+                        // CORREGIDO: LastPinged está en Assoc4/Assoc6 (IpPtsPng), no en ClientData
+                        // Verificar timeout usando AssocTimeout
                         if (!AssocTimeout(now, client.Assoc6))
                         {
                             ipPort = client.Assoc6.IpPort;
@@ -402,10 +411,10 @@ namespace ToxCore.Core
                             ipPort = client.Assoc4.IpPort;
                             return 1;
                         }
-                        return 0;
+                        return 0;  // Encontrado pero timeout
                     }
                 }
-                return -1;
+                return -1;  // No encontrado
             }
         }
 

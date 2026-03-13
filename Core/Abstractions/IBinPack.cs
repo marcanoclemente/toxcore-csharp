@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/IBinPack.cs
 using System;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz para empaquetado binario de datos (bin_pack.h).

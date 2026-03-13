@@ -2,7 +2,7 @@
 using System;
 using System.Net;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Estados de conexión de un amigo.

@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/IAttributes.cs
 using System;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz de gestión de atributos de usuario.

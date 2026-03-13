@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/ILanDiscoveryService.cs
 using System.Net;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Servicio de descubrimiento LAN para ToxCore.

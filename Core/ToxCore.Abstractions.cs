@@ -5,7 +5,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     // --------- DELEGADOS (fuera de interfaces) ---------
     public delegate void HandshakeInfoReadyDelegate(byte[] friendStaticPublic);

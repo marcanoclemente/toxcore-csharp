@@ -3,7 +3,7 @@ using System.Buffers;
 using System.Threading;
 using Toxcore.Core.Crypto;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Estructura interna equivalente a Ping_Array_Entry.

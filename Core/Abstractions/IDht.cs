@@ -2,7 +2,7 @@
 using System.Net;
 using System.Net.Sockets;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz de la tabla hash distribuida (DHT).

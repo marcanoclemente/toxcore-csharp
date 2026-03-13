@@ -1,18 +1,21 @@
-﻿// Core/Onion/OnionClient.cs - VERSIÓN CORREGIDA
+﻿// Core/Onion/OnionClient.cs - VERSIÓN COMPLETA CORREGIDA
 using System;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Threading;
+using Toxcore.Core;
+using Toxcore.Core.Abstractions;
+using Toxcore.Core.Abstractions.Onion;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
-using ToxCore.Core.Abstractions.Onion;
 
-namespace ToxCore.Core.Onion
+namespace Toxcore.Core.Onion
 {
     /// <summary>
     /// Cliente onion corregido para ToxCore.
     /// Usa el OnionCore corregido con sendback funcional.
+    /// CORREGIDO: Namespace, validaciones de null, y manejo de eventos.
     /// </summary>
     public sealed class OnionClient : IOnionClient, IDisposable
     {
@@ -39,10 +42,11 @@ namespace ToxCore.Core.Onion
         private const byte PacketFriendSearchResponse = 0x05;
         private const byte PacketPathDestroy = 0x02;
 
-        public event Action<int, IPEndPoint, byte[]> OnDataReceived;
-        public event Action<int> OnPathEstablished;
-        public event Action<int> OnPathTimeout;
-        public event Action<byte[], IPEndPoint> OnFriendFound;
+        // CORREGIDO: Eventos con parámetros correctos
+        public event Action<int, IPEndPoint, byte[]> OnDataReceived;  // pathId, source, data
+        public event Action<int> OnPathEstablished;  // pathId
+        public event Action<int> OnPathTimeout;  // pathId
+        public event Action<byte[], IPEndPoint> OnFriendFound;  // friendPk, endpoint
 
         public int ActivePathsCount => _paths.Count(p => p.Value.State == PathStateActive);
 
@@ -110,11 +114,11 @@ namespace ToxCore.Core.Onion
         }
 
         /// <summary>
-        /// NUEVO: Obtiene nodos únicos para un path.
+        /// Obtiene nodos únicos para un path.
         /// </summary>
         private IPEndPoint[] GetUniquePathNodes(int count)
         {
-            var candidates = new List<IPEndPoint>();
+            var candidates = new System.Collections.Generic.List<IPEndPoint>();
             var attempts = 0;
             const int maxAttempts = 10;
 
@@ -134,7 +138,7 @@ namespace ToxCore.Core.Onion
         }
 
         /// <summary>
-        /// NUEVO: Compara endpoints IP/Port.
+        /// Compara endpoints IP/Port.
         /// </summary>
         private bool IpPortEqual(IPEndPoint a, IPEndPoint b)
         {
@@ -144,8 +148,7 @@ namespace ToxCore.Core.Onion
         }
 
         /// <summary>
-        /// CORREGIDO: Envía un paquete de prueba usando tipo estándar.
-        /// Usa tipo 0x03 (Generic Data) en lugar de 0xFF no estándar.
+        /// Envía un paquete de prueba usando tipo estándar.
         /// </summary>
         private bool SendPathTest(int pathId)
         {
@@ -154,7 +157,7 @@ namespace ToxCore.Core.Onion
 
             try
             {
-                using var ms = new System.IO.MemoryStream();
+                using var ms = new MemoryStream();
                 // Usar tipo estándar 0x03 (Generic Data) con flag de test
                 ms.WriteByte(0x03); // PacketGenericData
                 ms.Write(BitConverter.GetBytes(pathId), 0, 4);
@@ -179,6 +182,9 @@ namespace ToxCore.Core.Onion
             }
         }
 
+        /// <summary>
+        /// Destruye un path onion.
+        /// </summary>
         public void KillPath(int pathId)
         {
             if (!_paths.TryRemove(pathId, out var path))
@@ -189,7 +195,7 @@ namespace ToxCore.Core.Onion
                 try
                 {
                     // Notificar al último nodo sobre destrucción del path
-                    using var ms = new System.IO.MemoryStream();
+                    using var ms = new MemoryStream();
                     ms.WriteByte(PacketPathDestroy);
                     ms.Write(BitConverter.GetBytes(pathId), 0, 4);
 
@@ -209,7 +215,6 @@ namespace ToxCore.Core.Onion
 
         /// <summary>
         /// Envía datos a través de un path onion específico.
-        /// CORRECCIÓN: Usa el sendback del OnionCore para recibir respuestas.
         /// </summary>
         public bool SendData(int pathId, byte[] destPublicKey, byte[] data)
         {
@@ -229,7 +234,7 @@ namespace ToxCore.Core.Onion
 
             try
             {
-                using var ms = new System.IO.MemoryStream();
+                using var ms = new MemoryStream();
                 ms.WriteByte(PacketGenericData);
                 ms.Write(BitConverter.GetBytes(pathId), 0, 4);
                 ms.Write(data, 0, data.Length);
@@ -255,7 +260,6 @@ namespace ToxCore.Core.Onion
 
         /// <summary>
         /// Busca un amigo enviando consultas por múltiples paths.
-        /// CORRECCIÓN: Usa el sendback para recibir respuestas.
         /// </summary>
         public bool FindFriend(byte[] friendPublicKey)
         {
@@ -293,7 +297,7 @@ namespace ToxCore.Core.Onion
             {
                 try
                 {
-                    using var ms = new System.IO.MemoryStream();
+                    using var ms = new MemoryStream();
                     ms.WriteByte(PacketFriendSearch);
                     ms.Write(friendPublicKey, 0, LibSodium.CRYPTO_PUBLIC_KEY_SIZE);
                     ms.Write(searchNonce, 0, LibSodium.CRYPTO_NONCE_SIZE);
@@ -323,10 +327,13 @@ namespace ToxCore.Core.Onion
                 PathsUsed = activePaths.Take(3).Select(p => p.PathId).ToArray()
             };
 
-            Logger.Log.Debug($"[ONIONCLIENT] Searching for friend {Logger.SafeKeyThumb(friendPublicKey)} via {activePaths.Count} paths");
+            Logger.Log.Debug($"[ONIONCLIENT] Searching for friend {BitConverter.ToString(friendPublicKey.Take(8).ToArray())} via {activePaths.Count} paths");
             return true;
         }
 
+        /// <summary>
+        /// Procesa tareas periódicas del cliente onion.
+        /// </summary>
         public void DoOnionClient()
         {
             var now = _monoTime.GetSeconds();
@@ -506,6 +513,9 @@ namespace ToxCore.Core.Onion
 
         #endregion
 
+        /// <summary>
+        /// Libera recursos.
+        /// </summary>
         public void Dispose()
         {
             _onionCore.UnregisterPacketHandler(PacketGenericData);

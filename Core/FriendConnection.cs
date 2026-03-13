@@ -6,10 +6,10 @@ using System.Linq;
 using System.Net;
 using System.Threading;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
-using ToxCore.Core.Abstractions.Onion;
+using Toxcore.Core.Abstractions;
+using Toxcore.Core.Abstractions.Onion;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Implementación completa y funcional de gestión de conexiones de amigos.

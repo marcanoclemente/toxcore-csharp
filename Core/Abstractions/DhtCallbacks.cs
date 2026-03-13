@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/DhtCallbacks.cs
 using System.Net;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Callback cuando se encuentra la IP de un amigo.

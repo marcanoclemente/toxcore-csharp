@@ -2,8 +2,8 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Threading;
-using ToxCore.Core;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core;
+using Toxcore.Core.Abstractions;
 
 namespace Toxcore.Core.Crypto
 {

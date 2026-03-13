@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/IFriendRequests.cs - CORREGIDO según friend_requests.h real
 using System;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Callback para solicitudes de amistad entrantes.

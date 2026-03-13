@@ -7,20 +7,15 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using Toxcore.Core.Abstractions;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
-
-
     /// <summary>
     /// Información de handler de paquete.
     /// Equivalente a Packet_Handler en C.
     /// </summary>
-    
-
-
     public sealed class NetworkCore : INetworkCore, INetworkAddressUtilities, IDisposable
     {
         private readonly PacketHandler[] _packetHandlers;
@@ -48,7 +43,16 @@ namespace ToxCore.Core
             _packetHandlers = new PacketHandler[256];
             for (int i = 0; i < 256; i++) _packetHandlers[i] = new PacketHandler();
 
-            _rateLimiter = enableRateLimit ? new PacketRateLimit() : null!;
+            for (int i = 0; i < 256; i++) _packetHandlers[i] = new PacketHandler();
+
+            // CORREGIDO: Usar parámetros del constructor para PacketRateLimit
+            _rateLimiter = enableRateLimit
+                ? new PacketRateLimit(
+                    capacityBytes: 100000,      // 100KB por bucket
+                    refillIntervalMs: 1000,     // Refill cada 1 segundo
+                    maxBuckets: 1024)           // Máximo 1024 endpoints
+                : null;
+
             _cts = new CancellationTokenSource();
 
             Initialize(bindAddress, portFrom, portTo);
@@ -88,7 +92,7 @@ namespace ToxCore.Core
 
             bindAddress ??= IPAddress.IPv6Any;
             bool isIPv6 = bindAddress.AddressFamily == AddressFamily.InterNetworkV6
-                       || bindAddress == IPAddress.IPv6Any;
+                || bindAddress == IPAddress.IPv6Any;
 
             Family = isIPv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork;
 
@@ -166,6 +170,9 @@ namespace ToxCore.Core
             }
         }
 
+        /// <summary>
+        /// CORREGIDO: Cierre graceful con timeout.
+        /// </summary>
         public void Shutdown()
         {
             if (_socket == null) return;
@@ -305,7 +312,7 @@ namespace ToxCore.Core
                 }
                 catch (ObjectDisposedException)
                 {
-                    // ✅ Socket cerrado por Dispose - no es error  
+                    // ✅ Socket cerrado por Dispose - no es error
                     Logger.Log.Debug("[Network] Socket disposed, exiting receive loop");
                     break;
                 }
@@ -329,8 +336,8 @@ namespace ToxCore.Core
 
         private void ProcessReceivedPacket(IPEndPoint source, byte[] data, int length)
         {
-
             Logger.Log.DebugF($"[NetworkCore] RECIBIDO: {length} bytes de {source}, tipo: 0x{data[0]:X2}");
+
             if (_rateLimiter != null && !_rateLimiter.ShouldAllow(source, length))
             {
                 Logger.Log.Debug($"[Network] Packet from {source} rate limited");
@@ -361,6 +368,7 @@ namespace ToxCore.Core
                 Logger.Log.ErrorF("[Network] Handler error for packet {0:X2}: {1}", packetId, ex.Message);
             }
         }
+
 
         // ========== INetworkAddressUtilities Implementation ==========
         // Implementaciones de instancia que llaman a la lógica estática existente

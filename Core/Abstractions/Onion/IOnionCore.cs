@@ -2,7 +2,7 @@
 using System;
 using System.Net;
 
-namespace ToxCore.Core.Abstractions.Onion
+namespace Toxcore.Core.Abstractions.Onion
 {
     /// <summary>
     /// Interfaz del núcleo de enrutamiento Onion.

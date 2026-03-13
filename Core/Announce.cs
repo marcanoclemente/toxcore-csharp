@@ -6,9 +6,9 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Threading;
 using Toxcore.Core.Crypto;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core.Abstractions;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Sistema de anuncio de presencia en DHT (announce.c).

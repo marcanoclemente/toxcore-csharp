@@ -1,7 +1,7 @@
 ﻿// Core/Abstractions/NetPacket.cs
 using System;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Representa un paquete de red saliente.

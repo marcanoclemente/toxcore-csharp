@@ -5,10 +5,10 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
-using ToxCore.Core.Abstractions;
-using ToxCore.Core.Abstractions.TCP;
+using Toxcore.Core.Abstractions;
+using Toxcore.Core.Abstractions.TCP;
 
-namespace ToxCore.Core.TCP
+namespace Toxcore.Core.TCP
 {
     /// <summary>
     /// Gestiona múltiples conexiones TCP (cliente y servidor).

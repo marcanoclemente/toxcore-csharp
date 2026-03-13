@@ -2,7 +2,7 @@
 using System.Diagnostics;
 using System.Threading;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Delegado para callback de tiempo personalizado (para testing).

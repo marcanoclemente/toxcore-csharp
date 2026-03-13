@@ -5,9 +5,9 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
-using ToxCore.Core.Abstractions;
+using Toxcore.Core.Abstractions;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Implementación del servicio de descubrimiento LAN.

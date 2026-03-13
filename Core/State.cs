@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Buffers.Binary;
 
-namespace ToxCore.Core
+namespace Toxcore.Core
 {
     /// <summary>
     /// Utilidades de serialización de estado (state.h/state.c).

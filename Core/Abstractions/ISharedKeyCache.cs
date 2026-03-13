@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Interfaz para cache de claves compartidas (shared_key_cache.h).

@@ -3,7 +3,7 @@ using System;
 using System.Net;
 using System.Threading.Tasks;
 
-namespace ToxCore.Core.Abstractions.TCP
+namespace Toxcore.Core.Abstractions.TCP
 {
     /// <summary>
     /// Interfaz para conexiones TCP (cliente y servidor).

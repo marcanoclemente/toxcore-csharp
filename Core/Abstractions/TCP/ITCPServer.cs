@@ -2,7 +2,7 @@
 using System;
 using System.Net;
 
-namespace ToxCore.Core.Abstractions.TCP
+namespace Toxcore.Core.Abstractions.TCP
 {
     public interface ITCPServer : IDisposable
     {

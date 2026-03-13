@@ -1,5 +1,5 @@
 ﻿// Core/Abstractions/NetPacketType.cs
-namespace ToxCore.Core.Abstractions
+namespace Toxcore.Core.Abstractions
 {
     /// <summary>
     /// Tipos de paquetes de red definidos en el protocolo Tox.
