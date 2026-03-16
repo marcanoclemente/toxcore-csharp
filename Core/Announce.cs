@@ -306,8 +306,41 @@ namespace Toxcore.Core
                 for (int i = 0; i < numRelays; i++)
                 {
                     // Solicitar forwarding para buscar al peer
-                    // Esto es una extensión que usa forwarding para anuncios
+                    RequestForwardingForPeerSearch(relayNodes[i].IpPort, relayNodes[i].PublicKey, publicKey);
                 }
+            }
+        }
+
+        private void RequestForwardingForPeerSearch(IPEndPoint relayEndpoint, byte[] relayPublicKey, byte[] targetPublicKey)
+        {
+            try
+            {
+                // Crear mensaje de búsqueda
+                using var ms = new System.IO.MemoryStream();
+                ms.WriteByte(0x01); // Tipo: Peer Search Request
+                ms.Write(targetPublicKey, 0, targetPublicKey.Length);
+                ms.Write(_selfPublicKey, 0, _selfPublicKey.Length);
+
+                var searchData = ms.ToArray();
+
+                // Solicitar forwarding al relay
+                uint forwardId = _forwarding.RequestForwarding(relayEndpoint, relayPublicKey);
+                if (forwardId == 0)
+                {
+                    Logger.Log.Warning("[MESSENGER] Failed to request forwarding for peer search");
+                    return;
+                }
+
+                // Enviar datos de búsqueda vía forwarding
+                bool sent = _forwarding.SendViaForwarding(forwardId, searchData);
+                if (sent)
+                {
+                    Logger.Log.Debug($"[MESSENGER] Sent peer search via forwarding to {relayEndpoint}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Error($"[MESSENGER] Error requesting forwarding for search: {ex.Message}");
             }
         }
 

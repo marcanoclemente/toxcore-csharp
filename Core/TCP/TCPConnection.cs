@@ -33,6 +33,10 @@ namespace Toxcore.Core.TCP
         private int _nextConnectionId = 1;
         private bool _disposed;
 
+        private const int TcpKeepaliveInterval = 30; // segundos
+        private ulong _lastKeepaliveTime;
+
+
         public int ConnectionCount => _connections.Count;
 
         public event Action<int, byte[]> OnDataReceived;
@@ -173,8 +177,12 @@ namespace Toxcore.Core.TCP
                 // Verificar timeouts
                 if (client.Status == TCPClient.TcpClientConnected)
                 {
-                    // Enviar ping si es necesario (usando TCPCommon)
-                    // Esto se manejaría en el bucle principal del cliente
+                    // Enviar keepalive periódicamente
+                    if (now - _lastKeepaliveTime > TcpKeepaliveInterval)
+                    {
+                        SendKeepalive(kvp.Key);
+                        _lastKeepaliveTime = now;
+                    }
                 }
 
                 if (!client.IsConnected && client.Status == TCPClient.TcpClientDisconnected)
@@ -182,6 +190,17 @@ namespace Toxcore.Core.TCP
                     OnDisconnected?.Invoke(kvp.Key);
                     RemoveConnection(kvp.Key);
                 }
+            }
+        }
+
+        private void SendKeepalive(int connectionId)
+        {
+            if (_connections.TryGetValue(connectionId, out var client))
+            {
+                // Enviar paquete de ping TCP (tipo 0x01 según protocolo Tox TCP)
+                var pingPacket = new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00 }; // Ping request ID = 0
+                client.WritePacket(pingPacket, false);
+                Logger.Log.Debug($"[TCP] Sent keepalive to connection {connectionId}");
             }
         }
 

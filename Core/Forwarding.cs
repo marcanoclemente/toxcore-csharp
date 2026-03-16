@@ -369,8 +369,21 @@ namespace Toxcore.Core
 
         private void SendDisconnectNotification(IPEndPoint relay, uint relayId)
         {
-            // Opcional: notificar al relay que cerramos
-            // Implementación depende del protocolo específico
+            try
+            {
+                // Construir paquete de desconexión
+                var packet = new byte[1 + 4 + 1];
+                packet[0] = PacketForwardReply; // Usar mismo tipo que reply
+                BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(1, 4), relayId);
+                packet[5] = 0xFF; // Status 0xFF = Disconnect Notification
+
+                _network.SendPacket(relay, packet, packet.Length);
+                Logger.Log.Debug($"[Forwarding] Sent disconnect notification for relay #{relayId}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Log.Debug($"[Forwarding] Error sending disconnect notification: {ex.Message}");
+            }
         }
 
         #endregion

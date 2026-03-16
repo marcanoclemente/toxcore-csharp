@@ -95,7 +95,7 @@ namespace Toxcore.Core.Crypto
             }
 
             return true;
-        }
+        }   
 
         /// <summary>
         /// Valida que un array sea un nonce válido

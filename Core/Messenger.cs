@@ -7,9 +7,11 @@ using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Threading;
+using Toxcore;
 using Toxcore.Core.Crypto;
 using Toxcore.Core.Abstractions;
 using Toxcore.Core.Abstractions.Onion;
+
 
 namespace Toxcore.Core
 {

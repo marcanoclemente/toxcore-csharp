@@ -45,7 +45,7 @@ namespace Toxcore.Core
         private readonly ISharedKeyCache _sharedKeysRecv;
         private readonly ISharedKeyCache _sharedKeysSent;
         private readonly ILanDiscoveryService _lanDiscovery;
-        private readonly bool _holePunchingEnabled;
+        private bool _holePunchingEnabled;
         private readonly bool _lanDiscoveryEnabled;
 
         #endregion
@@ -817,7 +817,26 @@ namespace Toxcore.Core
 
         public void SetHolePunchingEnabled(bool enabled)
         {
-            // Implementación en futura versión
+            _holePunchingEnabled = enabled;
+
+            if (!enabled)
+            {
+                // Detener hole punching activo
+                lock (_lockDht)
+                {
+                    for (int i = 0; i < _numFriends; i++)
+                    {
+                        ref var friend = ref _friendsList[i];
+                        friend.Nat.HolePunching = false;
+                        friend.Nat.PunchingTimestamp = 0;
+                    }
+                }
+                Logger.Log.Info("[DHT] Hole punching disabled");
+            }
+            else
+            {
+                Logger.Log.Info("[DHT] Hole punching enabled");
+            }
         }
 
         #endregion
